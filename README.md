@@ -16,25 +16,42 @@ Delete and prune are soft; rows are purged after 30 days.
 
 ## Install
 
-You need a Supabase project (the free tier works), the [Supabase CLI](https://supabase.com/docs/guides/cli) 2.117 or
-later, and [Deno](https://deno.com/) 2.x.
+You need a Supabase project (the free tier works), **Supabase CLI 3.x** (the commands below use its flags; CI pins
+3.0.0) and [Deno](https://deno.com/) 2.x.
 
 ```sh
 supabase link --project-ref <project-ref>
 supabase db push --remote
-supabase functions deploy agent-memory --project-ref <project-ref> --use-api
+supabase functions deploy agent-memory --use-api
 ```
 
 `db push` applies the migrations in `supabase/migrations/`, which create everything: the `agent_memory` schema, row
-level security, the search functions and the daily clean-up job. `--use-api` means no Docker is needed to deploy.
+level security, the search functions and the daily clean-up job. In CLI 3, `db push` targets the local stack unless
+you pass `--remote` (the linked project, or `--remote=<project-ref>`). `functions deploy` targets the linked project
+(or `--remote=<project-ref>`), and `--use-api` means no Docker is needed to deploy.
 
 The schema `agent_memory` must **not** be listed under Settings, API, Exposed schemas. Access goes only through the
 Edge Function; `anon` and `authenticated` have no privileges on it.
 
+### Temporal decay
+
+Search scores decay with age, as in the original. The half-life in days is the function secret
+`MEMORY_DECAY_HALF_LIFE` (default `30`):
+
+```sh
+supabase secrets set MEMORY_DECAY_HALF_LIFE=45
+```
+
+A value of `0` or less (or one that is not a number) disables decay. Then `prune` (and `stats.belowPruneThreshold`)
+uses only the dormant rule: a memory that was never accessed and is older than `maxDormantDays` (default 90). The
+original server instead treated every memory as a candidate when decay was off. Memories tagged `evergreen` or
+`never-forget` are never pruned.
+
 ## Admin quick-start
 
 The admin scripts connect to the database directly. Set `AGENT_MEMORY_DB_URL` to the session pooler connection string
-(Connect in the dashboard, port 5432) and keep it out of version control.
+(Connect in the dashboard, port 5432) and keep it out of version control. Percent-encode any special characters in the
+password (for example `@` as `%40`, `/` as `%2F`, `#` as `%23`), or the URL will not parse.
 
 ```sh
 export AGENT_MEMORY_DB_URL='postgresql://postgres.<project-ref>:<password>@<pooler-host>:5432/postgres'
@@ -47,11 +64,73 @@ deno run -A scripts/admin.ts grant ci-bot my-team read
 deno run -A scripts/admin.ts issue-token alice laptop --expires 90d   # shown once
 ```
 
-Other commands: `list-scopes`, `list-grants`, `list-tokens <member>`, `revoke <member> <scope>`,
-`revoke-token <id>`, `restore <memory-id>`. Tokens look like `amm_…` and only their SHA-256 hash is stored.
+Other commands: `list-scopes`, `list-grants`, `list-tokens <member>`, `revoke <member> <scope>` and
+`revoke-token <id>`. Tokens look like `amm_…` and only their SHA-256 hash is stored.
 
-Also in `scripts/`: `backup.ts` (export and restore a scope's memories), `import.ts` (load memories exported from a
-local LanceDB store, using `scripts/lancedb-export/export.mjs`, with a dry run first) and `smoke.ts`.
+### Undo, and erasing for good
+
+`delete` and `prune` are soft: a deleted memory stays restorable for 30 days, then the daily job purges it. A purge
+removes the content from the memory's history as well, so only the fact that it existed remains.
+
+```sh
+# What has been deleted, by whom, and when (all filters optional)
+deno run -A scripts/admin.ts list-deleted --scope my-team --by ci-bot --since 2026-11-01
+
+# Restore by id (one or several)
+deno run -A scripts/admin.ts restore <memory-id> <memory-id>
+
+# Undo a bad bulk prune: without --yes this lists what it would restore and exits 1
+deno run -A scripts/admin.ts restore --scope my-team --by ci-bot --since 2026-11-01
+deno run -A scripts/admin.ts restore --scope my-team --by ci-bot --since 2026-11-01 --yes
+
+# Erase a memory now (live or deleted), with its history content. Not reversible.
+deno run -A scripts/admin.ts erase <memory-id>         # shows id, scope and first line, exits 1
+deno run -A scripts/admin.ts erase <memory-id> --yes
+```
+
+`--by admin` matches deletions made directly in the database rather than by a member.
+
+### Backup and restore
+
+```sh
+deno run -A scripts/backup.ts backup                       # the whole install: scopes, members, grants, memories
+deno run -A scripts/backup.ts backup --scope my-team --out backup-my-team.json   # one scope
+deno run -A scripts/backup.ts restore-backup backup-<timestamp>.json
+```
+
+`backup` exports the whole install by default; `--scope` limits it to one scope (and the members it references). The
+file holds memory content: treat it as private. `restore-backup` loads only into an **empty** install (fresh
+migrations, no scopes, members or memories) and keeps ids. Access tokens are never exported, so after a restore,
+issue new tokens with `issue-token`.
+
+### Import from a local agent-memory-mcp store
+
+`scripts/import.ts` loads memories exported from a local LanceDB store, re-embedding each one through the function's
+`/embed` endpoint. It is a dry run until you pass `--execute`.
+
+```sh
+# 1. Export the LanceDB store to JSON (Node 20+). The output is private: memories*.json is gitignored.
+(cd scripts/lancedb-export && npm ci) && node scripts/lancedb-export/export.mjs <MEMORY_DB_PATH> > memories.json
+
+# 2. Dry run: choose by tag, review the list, and write the selected ids to a file
+deno run -A scripts/import.ts --file memories.json --include-tag repo:batpred --exclude-tag personal \
+  --write-ids ids.txt
+
+# 3. Edit ids.txt: delete any line you do not want shared (# starts a comment). Re-run the dry run with it
+deno run -A scripts/import.ts --file memories.json --include-tag repo:batpred --exclude-tag personal --ids ids.txt
+
+# 4. Import for real
+export AGENT_MEMORY_DB_URL='postgresql://…'                                     # as for the admin CLI
+export AGENT_MEMORY_URL=https://<project-ref>.supabase.co/functions/v1/agent-memory
+export AGENT_MEMORY_TOKEN=amm_…                                                 # any valid token, used for /embed
+deno run -A scripts/import.ts --file memories.json --include-tag repo:batpred --exclude-tag personal --ids ids.txt \
+  --scope my-team --as alice --execute
+```
+
+A tag filter alone can let private memories through, so review the ids before `--execute`. Re-running is safe:
+memories already present are skipped. Content over 20,000 characters is reported as failed and not imported.
+
+`scripts/smoke.ts` is described under [Smoke test](#smoke-test).
 
 ## Connect an agent
 
@@ -117,11 +196,12 @@ CI (`.github/workflows/ci.yml`) runs everything except the end-to-end test.
   is busy and the platform recycles it, a request can fail with `546`/`WORKER_RESOURCE_LIMIT`. Retry once; the retry
   lands on a fresh worker. To stay inside the budget, `store_batch` accepts at most 2 memories and `recall` embeds at
   most 5 topics per call. Details are in the [spike results](docs/superpowers/specs/2026-11-07-embedding-spike-results.md).
+- **Size limits.** A memory's content is at most 20,000 characters (`store`, `store_batch`, `update`, import), and
+  every result `limit` (`search`, `find_related`, `list_recent`, `recall`) is between 1 and 100.
 - **Free-tier pausing.** Free Supabase projects are paused after a period of inactivity. Unpause from the dashboard;
   the first request after that is slow.
 
 ## Credits
-
 
 This project builds on the design and code of
 [agent-memory-mcp](https://github.com/adamrdrew/agent-memory-mcp) by Adam Drew, via the
