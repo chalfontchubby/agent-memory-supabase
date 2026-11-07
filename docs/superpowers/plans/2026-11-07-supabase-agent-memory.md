@@ -599,6 +599,63 @@ README.md
 
 ---
 
+### Task 14: One-command setup and Claude configuration
+
+Added 2026-11-07 at the maintainer's request: a new user should get from an empty Supabase project to a working
+Claude connection with two commands.
+
+**Files:**
+- Create: `scripts/setup.ts`, `scripts/configure-claude.ts`, `scripts/lib/env-file.ts`,
+  `tests/integration/setup.test.ts`, `tests/unit/configure-claude.test.ts`, `tests/unit/env-file.test.ts`
+- Modify: `README.md` (a "Quick start" section at the top of setup instructions; the manual steps stay below it)
+
+**Interfaces:**
+- Consumes: `scripts/lib/admin-db.ts` (`createScope`, `createMember`, `grant`, `issueToken`, lookups), the CLI-3
+  commands the README documents (`supabase link`, `supabase db push --remote`, `supabase functions deploy agent-memory --use-api`).
+- Produces:
+  - `env-file.ts`: `readEnvFile(path): Promise<Map<string,string>>`, `upsertEnvVars(path, vars: Record<string,string>): Promise<void>`
+    — replaces existing `KEY=` lines in place, appends missing ones, preserves comments/other lines, writes with mode
+    0o600; `assertGitIgnored(path): Promise<void>` — runs `git check-ignore -q <path>` and throws
+    `<path> is not ignored by git; refusing to write secrets to it` when it is not ignored.
+  - `setup.ts`: `deno run -A scripts/setup.ts [--env-file .env] [--scope default] [--member <name>] [--bot] [--new-token] [--skip-deploy] [--configure-claude [--name shared-memory]]`.
+    Reads the env file (default `.env`;`SUPABASE_ACCESS_TOKEN`, `SUPABASE_DB_PASSWORD`, `SUPABASE_PROJECT_REF`; missing → a message naming
+    each missing key and where to get it). Steps, each printing one status line: build and save `AGENT_MEMORY_DB_URL`
+    (session pooler `aws-0-<region>…:5432`, password percent-encoded; region from the Management API project record,
+    not hard-coded); link; `db push --remote`; deploy (skipped with `--skip-deploy`); create scope (default `default`)
+    if absent; create member (default OS `$USER`, kind `human`… or `--bot`) if absent; grant `write` (upsert); issue a
+    token named `setup <ISO date>` **only** when the member has no live token in `.env` or `--new-token` is given;
+    save `AGENT_MEMORY_URL` (`https://<ref>.supabase.co/functions/v1/agent-memory`) and `AGENT_MEMORY_TOKEN` to `.env`
+    via `upsertEnvVars` after `assertGitIgnored('.env')`; print the URL and the token once. Re-running is safe.
+    `--configure-claude` then calls `configure-claude.ts`'s exported function with the URL and token.
+  - `configure-claude.ts`: `configureClaude({ name = 'shared-memory', url, token, scope = 'user', run = Deno.Command })`
+    and CLI `deno run -A scripts/configure-claude.ts [--name] [--url] [--token] [--scope user|project]` (url/token
+    default from `.env`). Runs `claude mcp remove <name> -s <scope>` (ignore "not found") then
+    `claude mcp add --transport http <name> <url> --header "Authorization: Bearer <token>" -s <scope>`. `--scope project`
+    prints a warning that `.mcp.json` is committed and the token would end up in git, and requires `--yes`. Never prints
+    the token. If `claude` is not on PATH: print the equivalent command with the token replaced by `$AGENT_MEMORY_TOKEN`
+    and exit 1.
+
+- [ ] **Step 1: Write the failing tests.**
+  - `env-file.test.ts`: upsert replaces an existing key in place, appends a new one, keeps comments and unrelated
+    lines byte-identical, result mode is 0600; `assertGitIgnored` throws on a temp git repo where the file is not ignored
+    and passes when it is.
+  - `configure-claude.test.ts` with an injected `run` stub: default call issues `remove` then `add` with
+    `-s user`, the exact header argument and name `shared-memory`; `--scope project` without `yes` throws and runs nothing;
+    the token never appears in anything written to stdout/stderr.
+  - `setup.test.ts` (local stack, `--skip-deploy`, link/push replaced by an injected runner that records commands): a
+    first run creates scope, member, grant and token and writes `AGENT_MEMORY_URL`/`AGENT_MEMORY_TOKEN`/`AGENT_MEMORY_DB_URL`
+    into a temp `.env` (ignored via a temp git repo); the token resolves via `resolve_token`; a second run creates
+    nothing new and issues no new token; `--new-token` issues one and replaces the `.env` line; missing
+    `SUPABASE_DB_PASSWORD` → message naming it, nothing created.
+- [ ] **Step 2:** `deno task test:unit && deno task test:int` → FAIL.
+- [ ] **Step 3:** Implement the three modules; README Quick start (`cp .env.example .env` if one exists, else the three
+  keys to fill; `deno run -A scripts/setup.ts --configure-claude`).
+- [ ] **Step 4:** All suites pass. Then run `scripts/setup.ts --scope smoke --member smoke-bot --bot --new-token` against
+  the real project (already migrated: push must report nothing to apply) **writing to a scratch env file, not the repo
+  `.env`** (`--env-file <scratch path>` option, added for this), confirm the token works with `scripts/smoke.ts`,
+  revoke it.
+- [ ] **Step 5:** Commit `feat: one-command setup and Claude configuration`.
+
 ## Rollout (after the tasks; each step needs a maintainer)
 
 1. `admin.ts create-scope predbat-devs --description "PredBat open-source development memory"`.
