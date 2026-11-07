@@ -1,4 +1,4 @@
-import { assert, assertEquals, assertRejects } from '@std/assert';
+import { assert, assertEquals, assertRejects, assertStringIncludes } from '@std/assert';
 import { connect } from '../../supabase/functions/_shared/db.ts';
 import { PgMemoryStore } from '../../supabase/functions/_shared/pg-store.ts';
 import { adminSql, LOCAL_DB_URL, makeWorld, type World } from '../helpers/fixtures.ts';
@@ -264,11 +264,15 @@ Deno.test('stats and prune agree when decay is disabled', () =>
     const a = await s.store(w.alpha.name, req('recent accessed one'));
     await s.store(w.alpha.name, req('recent two'));
     await s.store(w.alpha.name, req('recent evergreen', ['evergreen']));
+    const dormant = await s.store(w.alpha.name, req('old never accessed'));
+    const oldEvergreen = await s.store(w.alpha.name, req('old evergreen', ['evergreen']));
     await admin`update agent_memory.memories set access_count = 5, last_accessed_at = now() where id = ${a.id}`;
+    for (const m of [dormant, oldEvergreen]) await setUpdated(admin, m.id, '200 days');
     const dry = await s.prune({ scope: w.alpha.name, dryRun: true });
-    // Decay disabled: prune treats every non-evergreen memory as a candidate, and stats must say the same.
-    assertEquals(dry.candidates.length, 2);
-    assertEquals((await s.stats()).belowPruneThreshold, 2);
+    // Decay disabled: only the dormant rule applies (never accessed and older than 90 days), and stats agrees.
+    assertEquals(dry.candidates.map((c) => c.id), [dormant.id]);
+    assertStringIncludes(dry.candidates[0].reason, 'never accessed');
+    assertEquals((await s.stats()).belowPruneThreshold, 1);
   }));
 
 Deno.test('limits above 100 are rejected on every read; 100 is accepted', () =>
@@ -285,4 +289,13 @@ Deno.test('limits above 100 are rejected on every read; 100 is accepted', () =>
     assertEquals((await s.search('okapi', 'keyword', { limit: 100 })).length, 1);
     assertEquals((await s.findRelated(src.id, 100)).length, 0);
     assertEquals((await s.listRecent(100)).length, 1);
+  }));
+
+Deno.test('decay disabled: a recent memory is not a prune candidate', () =>
+  withWorld(async (w, _a, mk) => {
+    const [s] = mk(w.rw.id, 0);
+    await s.store(w.alpha.name, req('brand new, never accessed'));
+    const dry = await s.prune({ scope: w.alpha.name, dryRun: true });
+    assertEquals(dry.candidates, []);
+    assertEquals((await s.stats()).belowPruneThreshold, 0);
   }));

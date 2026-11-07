@@ -205,16 +205,24 @@ export class PgMemoryStore implements MemoryStore {
   ): { strength: number; reason: string } | null {
     if (isEvergreen(row.tags)) return null;
     const updatedAt = iso(row.updated_at);
-    const effectiveHalfLife = this.halfLifeDays * importanceMultiplier({
-      accessCount: row.access_count,
-      lastAccessedAt: row.last_accessed_at ? iso(row.last_accessed_at) : null,
-      updatedAt,
-    });
     const ageDays = Math.max(0, (Date.now() - new Date(updatedAt).getTime()) / MS_PER_DAY);
-    const strength = effectiveHalfLife > 0 ? Math.pow(0.5, ageDays / effectiveHalfLife) : 0;
+    // Deliberate deviation from the original server: there, a disabled half-life gave every memory strength 0,
+    // so "strength < minStrength" made every non-evergreen memory a prune candidate. Here, with decay disabled
+    // (half-life <= 0) nothing decays, strength is 1, and only the dormant criterion applies.
+    const decayOn = this.halfLifeDays > 0;
+    const strength = decayOn
+      ? Math.pow(
+        0.5,
+        ageDays / (this.halfLifeDays * importanceMultiplier({
+          accessCount: row.access_count,
+          lastAccessedAt: row.last_accessed_at ? iso(row.last_accessed_at) : null,
+          updatedAt,
+        })),
+      )
+      : 1;
     let reason = '';
-    if (strength < minStrength) reason = `strength ${strength.toFixed(4)} < ${minStrength}`;
-    else if (row.access_count === 0 && ageDays > maxDormantDays) {
+    if (decayOn && strength < minStrength) reason = `strength ${strength.toFixed(4)} < ${minStrength}`;
+    else if (Number(row.access_count) === 0 && ageDays > maxDormantDays) {
       reason = `never accessed, ${Math.floor(ageDays)} days old > ${maxDormantDays}`;
     }
     return reason ? { strength, reason } : null;
