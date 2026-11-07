@@ -7,15 +7,19 @@ import { FakeEmbedder } from '../helpers/fake-embedder.ts';
 type Admin = ReturnType<typeof adminSql>;
 
 async function withWorld(
-  fn: (w: World, admin: Admin, mk: (memberId: string) => [PgMemoryStore, FakeEmbedder]) => Promise<void>,
+  fn: (
+    w: World,
+    admin: Admin,
+    mk: (memberId: string, halfLife?: number) => [PgMemoryStore, FakeEmbedder],
+  ) => Promise<void>,
 ) {
   const admin = adminSql();
   const sql = connect(LOCAL_DB_URL);
   const w = await makeWorld(admin);
   try {
-    await fn(w, admin, (id) => {
+    await fn(w, admin, (id, halfLife = 30) => {
       const e = new FakeEmbedder();
-      return [new PgMemoryStore(sql, id, e, 30), e];
+      return [new PgMemoryStore(sql, id, e, halfLife), e];
     });
   } finally {
     await w.cleanup();
@@ -252,4 +256,17 @@ Deno.test('stats.belowPruneThreshold equals a default prune dry-run', () =>
     const dry = await s.prune({ scope: w.alpha.name, dryRun: true });
     assertEquals(dry.candidates.length, 2);
     assertEquals((await s.stats()).belowPruneThreshold, dry.candidates.length);
+  }));
+
+Deno.test('stats and prune agree when decay is disabled', () =>
+  withWorld(async (w, admin, mk) => {
+    const [s] = mk(w.rw.id, 0);
+    const a = await s.store(w.alpha.name, req('recent accessed one'));
+    await s.store(w.alpha.name, req('recent two'));
+    await s.store(w.alpha.name, req('recent evergreen', ['evergreen']));
+    await admin`update agent_memory.memories set access_count = 5, last_accessed_at = now() where id = ${a.id}`;
+    const dry = await s.prune({ scope: w.alpha.name, dryRun: true });
+    // Decay disabled: prune treats every non-evergreen memory as a candidate, and stats must say the same.
+    assertEquals(dry.candidates.length, 2);
+    assertEquals((await s.stats()).belowPruneThreshold, 2);
   }));
