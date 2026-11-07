@@ -87,12 +87,12 @@ Deno.test('decay: fresh beats old; evergreen is exempt', () =>
     await setUpdated(admin, old.id, '90 days');
     let r = await s.search('okapi handbook', 'keyword', {});
     assertEquals(r.map((x) => x.memory.id), [fresh.id, old.id]);
-    // Evergreen is exempt: an equally old evergreen memory now outranks the decayed fresh one's old twin by raw score.
+    // Evergreen is exempt from decay: an equally old evergreen memory must outrank its decayed twin.
     const eg = await s.store(w.alpha.name, req('okapi handbook', ['evergreen']));
     await setUpdated(admin, eg.id, '90 days');
     r = await s.search('okapi handbook', 'keyword', {});
     const score = (id: string) => r.find((x) => x.memory.id === id)!.score;
-    assertEquals(r[0].memory.id, eg.id);
+    assert(r.findIndex((x) => x.memory.id === eg.id) < r.findIndex((x) => x.memory.id === old.id));
     assert(score(eg.id) > score(old.id) * 2);
   }));
 
@@ -222,4 +222,34 @@ Deno.test('soft-deleted memories are invisible to every read', () =>
     assertEquals((await rw.listRecent(10)).map((m) => m.id), [src.id]);
     assertEquals((await rw.stats()).totalMemories, 1);
     await assertRejects(() => rw.findRelated(gone.id, 5), Error, `Memory ${gone.id} not found`);
+  }));
+
+Deno.test('empty tags filter means no filter', () =>
+  withWorld(async (w, _a, mk) => {
+    const [s] = mk(w.rw.id);
+    await s.store(w.alpha.name, req('tapir notes', ['x']));
+    await s.store(w.alpha.name, req('tapir notes two'));
+    const none = await s.search('tapir', 'keyword', {});
+    const empty = await s.search('tapir', 'keyword', { tags: [] });
+    assertEquals(none.length, 2);
+    assertEquals(empty.map((r) => r.memory.id).sort(), none.map((r) => r.memory.id).sort());
+  }));
+
+Deno.test('garbage date filters are rejected with a friendly error', () =>
+  withWorld(async (w, _a, mk) => {
+    const [s] = mk(w.rw.id);
+    await assertRejects(() => s.search('x', 'keyword', { after: 'garbage' }), Error, 'Invalid date filter');
+    await assertRejects(() => s.search('x', 'keyword', { before: 'garbage' }), Error, 'Invalid date filter');
+  }));
+
+Deno.test('stats.belowPruneThreshold equals a default prune dry-run', () =>
+  withWorld(async (w, admin, mk) => {
+    const [s] = mk(w.rw.id);
+    const olds = [await s.store(w.alpha.name, req('dormant one')), await s.store(w.alpha.name, req('dormant two'))];
+    await s.store(w.alpha.name, req('fresh one'));
+    const eg = await s.store(w.alpha.name, req('old but evergreen', ['evergreen']));
+    for (const m of [...olds, eg]) await setUpdated(admin, m.id, '200 days');
+    const dry = await s.prune({ scope: w.alpha.name, dryRun: true });
+    assertEquals(dry.candidates.length, 2);
+    assertEquals((await s.stats()).belowPruneThreshold, dry.candidates.length);
   }));

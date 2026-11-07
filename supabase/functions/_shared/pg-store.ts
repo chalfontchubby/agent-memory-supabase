@@ -1,7 +1,13 @@
 import type postgres from 'npm:postgres@3.4.5';
 import { type Sql, withMember } from './db.ts';
 import { applyDecay, importanceMultiplier, isEvergreen, parseDecayHalfLife } from './decay.ts';
-import { DEFAULT_LIMIT, OVER_FETCH_FACTOR, STORE_BATCH_MAX } from './limits.ts';
+import {
+  DEFAULT_LIMIT,
+  OVER_FETCH_FACTOR,
+  PRUNE_MAX_DORMANT_DAYS_DEFAULT,
+  PRUNE_MIN_STRENGTH_DEFAULT,
+  STORE_BATCH_MAX,
+} from './limits.ts';
 import type {
   Embedder,
   Memory,
@@ -190,8 +196,35 @@ export class PgMemoryStore implements MemoryStore {
     }, (code) => code === '22P02' ? notFoundMemory(id) : undefined);
   }
 
+  /** The single prune rule, shared by prune and stats. Returns null when the memory is not a candidate. */
+  private pruneVerdict(
+    row: Row,
+    minStrength: number,
+    maxDormantDays: number,
+  ): { strength: number; reason: string } | null {
+    if (isEvergreen(row.tags)) return null;
+    const updatedAt = iso(row.updated_at);
+    const effectiveHalfLife = this.halfLifeDays * importanceMultiplier({
+      accessCount: row.access_count,
+      lastAccessedAt: row.last_accessed_at ? iso(row.last_accessed_at) : null,
+      updatedAt,
+    });
+    const ageDays = Math.max(0, (Date.now() - new Date(updatedAt).getTime()) / MS_PER_DAY);
+    const strength = effectiveHalfLife > 0 ? Math.pow(0.5, ageDays / effectiveHalfLife) : 0;
+    let reason = '';
+    if (strength < minStrength) reason = `strength ${strength.toFixed(4)} < ${minStrength}`;
+    else if (row.access_count === 0 && ageDays > maxDormantDays) {
+      reason = `never accessed, ${Math.floor(ageDays)} days old > ${maxDormantDays}`;
+    }
+    return reason ? { strength, reason } : null;
+  }
+
   async prune(o: PruneOptions): Promise<PruneResult> {
-    const { dryRun = true, minStrength = 0.05, maxDormantDays = 90 } = o;
+    const {
+      dryRun = true,
+      minStrength = PRUNE_MIN_STRENGTH_DEFAULT,
+      maxDormantDays = PRUNE_MAX_DORMANT_DAYS_DEFAULT,
+    } = o;
     return await this.run(async (tx) => {
       const scopeId = await this.writableScope(tx, o.scope);
       const rows = await tx<Row[]>`
@@ -199,21 +232,10 @@ export class PgMemoryStore implements MemoryStore {
         from agent_memory.memories where scope_id = ${scopeId}::uuid`;
       const candidates: PruneResult['candidates'] = [];
       for (const row of rows) {
-        if (isEvergreen(row.tags)) continue;
-        const updatedAt = iso(row.updated_at);
-        const effectiveHalfLife = this.halfLifeDays * importanceMultiplier({
-          accessCount: row.access_count,
-          lastAccessedAt: row.last_accessed_at ? iso(row.last_accessed_at) : null,
-          updatedAt,
-        });
-        const ageDays = Math.max(0, (Date.now() - new Date(updatedAt).getTime()) / MS_PER_DAY);
-        const strength = effectiveHalfLife > 0 ? Math.pow(0.5, ageDays / effectiveHalfLife) : 0;
-        let reason = '';
-        if (strength < minStrength) reason = `strength ${strength.toFixed(4)} < ${minStrength}`;
-        else if (row.access_count === 0 && ageDays > maxDormantDays) {
-          reason = `never accessed, ${Math.floor(ageDays)} days old > ${maxDormantDays}`;
+        const v = this.pruneVerdict(row, minStrength, maxDormantDays);
+        if (v) {
+          candidates.push({ id: row.id, content: row.content.slice(0, 120), strength: v.strength, reason: v.reason });
         }
-        if (reason) candidates.push({ id: row.id, content: row.content.slice(0, 120), strength, reason });
       }
       let pruned = 0;
       if (!dryRun && candidates.length > 0) {
@@ -268,6 +290,9 @@ export class PgMemoryStore implements MemoryStore {
     if (!SEARCH_MODES.includes(mode)) throw new Error('Invalid search mode');
     const limit = f.limit ?? DEFAULT_LIMIT;
     checkLimit(limit);
+    for (const d of [f.after, f.before]) {
+      if (d !== undefined && Number.isNaN(Date.parse(d))) throw new StoreError('Invalid date filter');
+    }
     // null forces keyword-only; otherwise embed (outside the transaction) unless the mode is keyword.
     let effectiveMode: SearchMode = mode;
     let emb: number[] | null = null;
@@ -280,13 +305,13 @@ export class PgMemoryStore implements MemoryStore {
       const rows = await tx<Row[]>`
         select * from agent_memory.search_memories(
           ${query}::text, ${embArg}::extensions.vector, ${effectiveMode}::text, ${scopeIds}::uuid[],
-          ${f.category ?? null}::text, ${f.tags ? tx.array(f.tags) : null}::text[],
+          ${f.category ?? null}::text, ${f.tags?.length ? tx.array(f.tags) : null}::text[],
           ${f.after ?? null}::timestamptz, ${f.before ?? null}::timestamptz,
           ${limit * OVER_FETCH_FACTOR}::int)`;
       const results = applyDecay(this.toDecayInputs(rows), limit, this.halfLifeDays);
       await this.touch(tx, results);
       return results;
-    }, (code) => code === '22007' || code === '22008' ? new StoreError('Invalid date filter') : undefined);
+    });
   }
 
   async findRelated(id: string, limit: number, scopes?: string[]): Promise<SearchResult[]> {
@@ -347,17 +372,7 @@ export class PgMemoryStore implements MemoryStore {
         const created = new Date(r.created_at).getTime();
         if (oldest === null || created < oldest) oldest = created;
         if (newest === null || created > newest) newest = created;
-        if (!isEvergreen(r.tags)) {
-          const updatedAt = iso(r.updated_at);
-          const ageDays = Math.max(0, (Date.now() - new Date(updatedAt).getTime()) / MS_PER_DAY);
-          const eff = this.halfLifeDays * importanceMultiplier({
-            accessCount: ac,
-            lastAccessedAt: r.last_accessed_at ? iso(r.last_accessed_at) : null,
-            updatedAt,
-          });
-          const weak = eff > 0 && Math.pow(0.5, ageDays / eff) < 0.05;
-          if (weak || (ac === 0 && ageDays > 90)) belowPruneThreshold++;
-        }
+        if (this.pruneVerdict(r, PRUNE_MIN_STRENGTH_DEFAULT, PRUNE_MAX_DORMANT_DAYS_DEFAULT)) belowPruneThreshold++;
       }
       const mostAccessed = rows
         .map((r) => ({

@@ -8,3 +8,6 @@ export const OVER_FETCH_FACTOR = 3;
 /** Documentation only: the SQL search functions hard-code k = 60. */
 export const RRF_K = 60;
 export const ACCESS_TOUCH_INTERVAL_HOURS = 1;
+/** Prune defaults, shared by prune and stats.belowPruneThreshold. */
+export const PRUNE_MIN_STRENGTH_DEFAULT = 0.05;
+export const PRUNE_MAX_DORMANT_DAYS_DEFAULT = 90;
