@@ -35,8 +35,14 @@ const modeSchema = z
 
 // ── Tool result helpers ────────────────────────────────────────────
 
-function success(data: unknown) {
+export function success(data: unknown) {
   return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+}
+
+/** A failure result whose text is the error message alone (admin rule texts are returned verbatim). */
+export function failure(err: unknown) {
+  const message = err instanceof Error ? err.message : String(err);
+  return { content: [{ type: 'text' as const, text: message }], isError: true };
 }
 
 function error(prefix: string, err: unknown) {
