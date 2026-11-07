@@ -1,6 +1,8 @@
 import { z } from 'npm:zod@4.6.7';
 import type { McpServer } from 'npm:@modelcontextprotocol/server@2.4.0';
 import type { PgAdminStore } from './admin-store.ts';
+import { isUuid } from './thread-store.ts';
+import { StoreError } from './limits.ts';
 import { failure, success } from './tools.ts';
 
 const ISSUE_NOTE = 'Shown once - give it to the member privately; it is not stored and cannot be shown again.';
@@ -16,7 +18,7 @@ async function guard(fn: () => Promise<unknown>) {
 
 const MEMBER_NAME_MSG = "Member names can't be blank or start or end with a space";
 
-/** Registers the 12 admin tools. Register them for admins only. */
+/** Registers the 13 admin tools. Register them for admins only. */
 export function registerAdminTools(server: McpServer, admin: PgAdminStore): void {
   server.registerTool('admin_list_scopes', {
     description:
@@ -44,6 +46,16 @@ export function registerAdminTools(server: McpServer, admin: PgAdminStore): void
     guard(async () => {
       await admin.deleteScope(name);
       return { deleted: name };
+    }));
+
+  server.registerTool('admin_delete_thread', {
+    description: 'Admin: Delete a thread with its posts, links and subscriptions. Cannot be undone from here.',
+    inputSchema: z.object({ thread_id: z.string().describe('Thread id') }),
+  }, ({ thread_id }) =>
+    guard(async () => {
+      if (!isUuid(thread_id)) throw new StoreError(`Thread ${thread_id} not found`);
+      await admin.deleteThread(thread_id);
+      return { deleted: thread_id };
     }));
 
   server.registerTool('admin_list_members', {

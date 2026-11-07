@@ -69,9 +69,9 @@ Deno.test('edge function end-to-end over MCP', async () => {
     const ro = await issue(world.ro.id);
     const none = await issue(world.none.id);
 
-    await t('tools/list returns 11 tools', async () => {
+    await t('tools/list returns 22 tools', async () => {
       const c = await open(rw.token);
-      assertEquals((await c.listTools()).tools.length, 11);
+      assertEquals((await c.listTools()).tools.length, 22);
     });
 
     await t('store, search, update, find_related, delete as rw', async () => {
@@ -171,22 +171,86 @@ Deno.test('edge function end-to-end over MCP', async () => {
       assertEquals(parse(await c.callTool({ name: 'list_scopes', arguments: {} })), { count: 0, scopes: [] });
     });
 
-    await t('admin token sees 23 tools; non-admin and bot see the 11 originals', async () => {
+    await t('admin token sees 35 tools; non-admin and bot see the 22 non-admin tools', async () => {
       const [a] = await sql`
         insert into agent_memory.members (display_name, kind) values (${adminName}, 'human') returning id`;
       await setAdmin(sql, adminName, true);
       const admin = await issue(a.id);
       const names = async (tok: string) => (await (await open(tok)).listTools()).tools.map((x) => x.name);
       const adminTools = await names(admin.token);
-      assertEquals(adminTools.length, 23);
-      assertEquals(adminTools.filter((n) => n.startsWith('admin_')).length, 12);
+      assertEquals(adminTools.length, 35);
+      assertEquals(adminTools.filter((n) => n.startsWith('admin_')).length, 13);
       const base = await names(rw.token);
-      assertEquals(base.length, 11);
+      assertEquals(base.length, 22);
       assert(!base.some((n) => n.startsWith('admin_')));
       assertEquals(await names(none.token), base);
       const bot = await issue(world.bw.id);
       assertEquals(await names(bot.token), base);
-      assertEquals(adminTools.slice(0, 11), base);
+      assertEquals(adminTools.slice(0, 22), base);
+    });
+
+    await t('two clients on one token trade a question and answer', async () => {
+      const c1 = await open(rw.token);
+      const c2 = await open(rw.token);
+      const names = (await c1.listTools()).tools.map((x) => x.name);
+      for (
+        const n of [
+          'create_thread',
+          'post',
+          'read_thread',
+          'list_threads',
+          'resolve_thread',
+          'reopen_thread',
+          'link_memory',
+          'unlink_memory',
+          'subscribe',
+          'unsubscribe',
+          'whats_new',
+        ]
+      ) assert(names.includes(n), n);
+      assert(!names.includes('admin_delete_thread'));
+
+      const created = parse(
+        await c1.callTool({
+          name: 'create_thread',
+          arguments: {
+            scope: world.alpha.name,
+            title: 'e2e question',
+            body: 'what do quokkas eat?',
+            session_label: 'asker',
+          },
+        }),
+      );
+      assertEquals(created.session.created, true);
+      assertEquals(created.note?.startsWith('New agent session.'), true);
+      const threadId = created.thread.id as string;
+
+      const answered = parse(
+        await c2.callTool({
+          name: 'post',
+          arguments: { thread_id: threadId, body: 'eucalyptus', session_label: 'answerer' },
+        }),
+      );
+      assertEquals(answered.threadId, threadId);
+      assertEquals(answered.post.sessionLabel, 'answerer');
+
+      const news = parse(await c1.callTool({ name: 'whats_new', arguments: { session_label: 'asker' } }));
+      assertEquals(news.threads.length, 1);
+      assertEquals(news.threads[0].threadId, threadId);
+      assertEquals(news.threads[0].newPosts, 1);
+
+      const read = parse(
+        await c1.callTool({ name: 'read_thread', arguments: { thread_id: threadId, session_label: 'asker' } }),
+      );
+      const reply = read.posts.find((p: { body: string }) => p.body === 'eucalyptus');
+      assertEquals(reply.new, true);
+
+      const again = parse(await c1.callTool({ name: 'whats_new', arguments: { session_label: 'asker' } }));
+      assertEquals(again.threads, []);
+
+      const bad = await c1.callTool({ name: 'post', arguments: { thread_id: 'nope', body: 'x' } });
+      assertEquals(bad.isError, true);
+      assertEquals(text(bad), 'Thread nope not found');
     });
 
     await t('non-admin calling admin_create_scope gets the unknown-tool error', async () => {
@@ -216,7 +280,7 @@ Deno.test('edge function end-to-end over MCP', async () => {
       assertEquals(scopes.count, 1);
       assertEquals(scopes.scopes[0].scope, world.alpha.name);
       assertEquals(scopes.scopes[0].access, 'read');
-      assertEquals((await nc.listTools()).tools.length, 11);
+      assertEquals((await nc.listTools()).tools.length, 22);
 
       await ok('admin_deactivate_member', { name: newName });
       const r = await post({ authorization: `Bearer ${issued.token}` }, '', {

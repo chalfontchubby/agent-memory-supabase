@@ -7,6 +7,7 @@ import { GteSmallEmbedder } from '../_shared/embedder.ts';
 import { MAX_CONTENT_CHARS } from '../_shared/limits.ts';
 import { PgMemoryStore } from '../_shared/pg-store.ts';
 import { PgThreadStore } from '../_shared/thread-store.ts';
+import { registerThreadTools } from '../_shared/thread-tools.ts';
 import { registerTools } from '../_shared/tools.ts';
 
 const VERSION = '0.1.0';
@@ -69,6 +70,7 @@ async function handle(req: Request): Promise<Response> {
   const mcp = createMcpHandler(() => {
     const s = new McpServer({ name: 'agent-memory-supabase', version: VERSION });
     registerTools(s, store, embedder, threads);
+    registerThreadTools(s, threads);
     if (isAdmin) registerAdminTools(s, new PgAdminStore(sql, memberId));
     return s;
   }, { onerror: (e) => console.error('mcp error', e) });
