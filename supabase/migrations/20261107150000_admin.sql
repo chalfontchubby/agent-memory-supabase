@@ -312,3 +312,242 @@ revoke execute on function agent_memory.adm_grant(text, text, text, uuid, text) 
 revoke execute on function agent_memory.adm_revoke(text, text, uuid, text) from public;
 revoke execute on function agent_memory.adm_issue_token(text, text, text, timestamptz, uuid, text) from public;
 revoke execute on function agent_memory.adm_revoke_token(uuid, uuid, text) from public;
+
+-- ============================================================================
+-- Member-callable admin_* wrappers. Each runs as owner, checks the caller is an active admin, refuses to
+-- act on another admin, then delegates to the matching postgres-only adm_* function.
+-- ============================================================================
+
+-- Private helper: not executable by agent_memory_member, only reachable from the wrappers below.
+create function agent_memory.require_admin() returns uuid
+language plpgsql stable security definer set search_path = ''
+as $$
+declare
+  v_id uuid := agent_memory.current_member_id();
+begin
+  if v_id is null or not exists (
+    select 1 from agent_memory.members where id = v_id and is_admin and deactivated_at is null
+  ) then
+    raise exception 'Admin only' using errcode = '42501';
+  end if;
+  return v_id;
+end
+$$;
+
+create function agent_memory.admin_label(p_id uuid) returns text
+language sql stable security definer set search_path = ''
+as $$ select display_name from agent_memory.members where id = p_id $$;
+
+-- Raises if p_name is a member other than the caller who is an admin.
+create function agent_memory.assert_not_other_admin(p_name text, p_caller uuid) returns void
+language plpgsql stable security definer set search_path = ''
+as $$
+begin
+  if exists (
+    select 1 from agent_memory.members where display_name = p_name and id <> p_caller and is_admin
+  ) then
+    raise exception 'Member ''%'' is an admin; manage admins from the shell', p_name;
+  end if;
+end
+$$;
+
+create function agent_memory.admin_create_scope(p_name text, p_description text) returns uuid
+language plpgsql security definer set search_path = ''
+as $$
+declare
+  v_caller uuid := agent_memory.require_admin();
+begin
+  return agent_memory.adm_create_scope(p_name, p_description, v_caller, agent_memory.admin_label(v_caller));
+end
+$$;
+
+create function agent_memory.admin_delete_scope(p_name text) returns void
+language plpgsql security definer set search_path = ''
+as $$
+declare
+  v_caller uuid := agent_memory.require_admin();
+begin
+  perform agent_memory.adm_delete_scope(p_name, v_caller, agent_memory.admin_label(v_caller));
+end
+$$;
+
+create function agent_memory.admin_create_member(p_name text, p_kind text, p_email text) returns uuid
+language plpgsql security definer set search_path = ''
+as $$
+declare
+  v_caller uuid := agent_memory.require_admin();
+begin
+  return agent_memory.adm_create_member(p_name, p_kind, p_email, v_caller, agent_memory.admin_label(v_caller));
+end
+$$;
+
+create function agent_memory.admin_deactivate_member(p_name text) returns void
+language plpgsql security definer set search_path = ''
+as $$
+declare
+  v_caller uuid := agent_memory.require_admin();
+begin
+  if exists (select 1 from agent_memory.members where id = v_caller and display_name = p_name) then
+    raise exception 'You can''t deactivate yourself';
+  end if;
+  perform agent_memory.assert_not_other_admin(p_name, v_caller);
+  perform agent_memory.adm_deactivate_member(p_name, v_caller, agent_memory.admin_label(v_caller));
+end
+$$;
+
+create function agent_memory.admin_grant(p_member text, p_scope text, p_access text) returns void
+language plpgsql security definer set search_path = ''
+as $$
+declare
+  v_caller uuid := agent_memory.require_admin();
+begin
+  perform agent_memory.assert_not_other_admin(p_member, v_caller);
+  perform agent_memory.adm_grant(p_member, p_scope, p_access, v_caller, agent_memory.admin_label(v_caller));
+end
+$$;
+
+create function agent_memory.admin_revoke(p_member text, p_scope text) returns boolean
+language plpgsql security definer set search_path = ''
+as $$
+declare
+  v_caller uuid := agent_memory.require_admin();
+begin
+  perform agent_memory.assert_not_other_admin(p_member, v_caller);
+  return agent_memory.adm_revoke(p_member, p_scope, v_caller, agent_memory.admin_label(v_caller));
+end
+$$;
+
+create function agent_memory.admin_issue_token(p_member text, p_name text, p_hash text) returns uuid
+language plpgsql security definer set search_path = ''
+as $$
+declare
+  v_caller uuid := agent_memory.require_admin();
+begin
+  perform agent_memory.assert_not_other_admin(p_member, v_caller);
+  return agent_memory.adm_issue_token(p_member, p_name, p_hash, null, v_caller, agent_memory.admin_label(v_caller));
+end
+$$;
+
+create function agent_memory.admin_revoke_token(p_id uuid) returns void
+language plpgsql security definer set search_path = ''
+as $$
+declare
+  v_caller uuid := agent_memory.require_admin();
+  v_owner uuid;
+  v_owner_name text;
+  v_live boolean;
+begin
+  select t.member_id, m.display_name, (t.revoked_at is null and (t.expires_at is null or t.expires_at > pg_catalog.now()))
+  into v_owner, v_owner_name, v_live
+  from agent_memory.access_tokens t join agent_memory.members m on m.id = t.member_id
+  where t.id = p_id;
+  if v_owner is not null then
+    perform agent_memory.assert_not_other_admin(v_owner_name, v_caller);
+    if v_owner = v_caller and v_live then
+      -- lock the caller's live tokens so two concurrent revokes cannot both pass
+      perform 1 from agent_memory.access_tokens
+        where member_id = v_caller and revoked_at is null and (expires_at is null or expires_at > pg_catalog.now())
+        for update;
+      if (select pg_catalog.count(*) from agent_memory.access_tokens
+          where member_id = v_caller and revoked_at is null and (expires_at is null or expires_at > pg_catalog.now())) <= 1 then
+        raise exception 'You can''t revoke your last live token';
+      end if;
+    end if;
+  end if;
+  perform agent_memory.adm_revoke_token(p_id, v_caller, agent_memory.admin_label(v_caller));
+end
+$$;
+
+create function agent_memory.admin_list_scopes()
+returns table (name text, description text, memories int, deleted int, readers int, writers int)
+language plpgsql stable security definer set search_path = ''
+as $$
+begin
+  perform agent_memory.require_admin();
+  return query
+    select s.name, s.description,
+      (select pg_catalog.count(*) from agent_memory.memories x where x.scope_id = s.id and x.deleted_at is null)::int,
+      (select pg_catalog.count(*) from agent_memory.memories x where x.scope_id = s.id and x.deleted_at is not null)::int,
+      (select pg_catalog.count(*) from agent_memory.scope_grants g where g.scope_id = s.id and g.access = 'read')::int,
+      (select pg_catalog.count(*) from agent_memory.scope_grants g where g.scope_id = s.id and g.access = 'write')::int
+    from agent_memory.scopes s order by s.name;
+end
+$$;
+
+create function agent_memory.admin_list_members()
+returns table (name text, kind text, email text, is_admin boolean, deactivated boolean, live_tokens int)
+language plpgsql stable security definer set search_path = ''
+as $$
+begin
+  perform agent_memory.require_admin();
+  return query
+    select m.display_name, m.kind, m.email, m.is_admin, (m.deactivated_at is not null),
+      (select pg_catalog.count(*) from agent_memory.access_tokens t
+        where t.member_id = m.id and t.revoked_at is null and (t.expires_at is null or t.expires_at > pg_catalog.now()))::int
+    from agent_memory.members m order by m.display_name;
+end
+$$;
+
+create function agent_memory.admin_list_grants(p_scope text, p_member text)
+returns table (scope text, member text, access text, granted_at timestamptz, granted_by text)
+language plpgsql stable security definer set search_path = ''
+as $$
+begin
+  perform agent_memory.require_admin();
+  return query
+    select s.name, m.display_name, g.access, g.granted_at, g.granted_by
+    from agent_memory.scope_grants g
+    join agent_memory.scopes s on s.id = g.scope_id
+    join agent_memory.members m on m.id = g.member_id
+    where (p_scope is null or s.name = p_scope) and (p_member is null or m.display_name = p_member)
+    order by s.name, m.display_name;
+end
+$$;
+
+create function agent_memory.admin_list_tokens(p_member text)
+returns table (id uuid, name text, created_at timestamptz, last_used_at timestamptz, revoked_at timestamptz)
+language plpgsql stable security definer set search_path = ''
+as $$
+declare
+  v_caller uuid := agent_memory.require_admin();
+  v_member uuid;
+begin
+  perform agent_memory.assert_not_other_admin(p_member, v_caller);
+  select m.id into v_member from agent_memory.members m where m.display_name = p_member;
+  if v_member is null then
+    raise exception 'Member ''%'' not found', p_member;
+  end if;
+  return query
+    select t.id, t.name, t.created_at, t.last_used_at, t.revoked_at
+    from agent_memory.access_tokens t where t.member_id = v_member order by t.created_at, t.id;
+end
+$$;
+
+revoke execute on function agent_memory.require_admin() from public;
+revoke execute on function agent_memory.admin_label(uuid) from public;
+revoke execute on function agent_memory.assert_not_other_admin(text, uuid) from public;
+revoke execute on function agent_memory.admin_create_scope(text, text) from public;
+revoke execute on function agent_memory.admin_delete_scope(text) from public;
+revoke execute on function agent_memory.admin_create_member(text, text, text) from public;
+revoke execute on function agent_memory.admin_deactivate_member(text) from public;
+revoke execute on function agent_memory.admin_grant(text, text, text) from public;
+revoke execute on function agent_memory.admin_revoke(text, text) from public;
+revoke execute on function agent_memory.admin_issue_token(text, text, text) from public;
+revoke execute on function agent_memory.admin_revoke_token(uuid) from public;
+revoke execute on function agent_memory.admin_list_scopes() from public;
+revoke execute on function agent_memory.admin_list_members() from public;
+revoke execute on function agent_memory.admin_list_grants(text, text) from public;
+revoke execute on function agent_memory.admin_list_tokens(text) from public;
+
+grant execute on function agent_memory.admin_create_scope(text, text) to agent_memory_member;
+grant execute on function agent_memory.admin_delete_scope(text) to agent_memory_member;
+grant execute on function agent_memory.admin_create_member(text, text, text) to agent_memory_member;
+grant execute on function agent_memory.admin_deactivate_member(text) to agent_memory_member;
+grant execute on function agent_memory.admin_grant(text, text, text) to agent_memory_member;
+grant execute on function agent_memory.admin_revoke(text, text) to agent_memory_member;
+grant execute on function agent_memory.admin_issue_token(text, text, text) to agent_memory_member;
+grant execute on function agent_memory.admin_revoke_token(uuid) to agent_memory_member;
+grant execute on function agent_memory.admin_list_scopes() to agent_memory_member;
+grant execute on function agent_memory.admin_list_members() to agent_memory_member;
+grant execute on function agent_memory.admin_list_grants(text, text) to agent_memory_member;
+grant execute on function agent_memory.admin_list_tokens(text) to agent_memory_member;
