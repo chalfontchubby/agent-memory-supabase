@@ -30,6 +30,8 @@ join agent_memory.scopes s on s.id = m.scope_id;
 
 grant select on agent_memory.memory_view to agent_memory_member;
 
+-- Contract: returns at most p_limit rows in every mode (each hybrid arm fetches p_limit, fused result is
+-- trimmed to p_limit); callers over-fetch for decay re-ranking.
 -- hnsw.iterative_scan makes the HNSW index keep scanning until enough rows pass the RLS filter,
 -- so a member with a small scope still gets a full page.
 create function agent_memory.search_memories(
@@ -53,7 +55,6 @@ set hnsw.iterative_scan = relaxed_order
 as $$
 #variable_conflict use_column
 declare
-  v_fetch int := p_limit * 3; -- per-arm over-fetch for RRF; single-mode searches return p_limit
   v_tsq tsquery;
 begin
   if p_mode not in ('keyword', 'semantic', 'hybrid') then
@@ -113,7 +114,7 @@ begin
         and (p_after is null or m.created_at >= p_after)
         and (p_before is null or m.created_at <= p_before)
       order by pg_catalog.ts_rank_cd(m.fts, v_tsq) desc, m.id
-      limit v_fetch
+      limit p_limit
     ),
     sem as (
       select m.id, pg_catalog.row_number() over (order by m.embedding operator(extensions.<=>) p_embedding, m.id) as rnk
@@ -124,7 +125,7 @@ begin
         and (p_after is null or m.created_at >= p_after)
         and (p_before is null or m.created_at <= p_before)
       order by m.embedding operator(extensions.<=>) p_embedding, m.id
-      limit v_fetch
+      limit p_limit
     ),
     fused as (
       select coalesce(kw.id, sem.id) as id,
@@ -136,7 +137,7 @@ begin
     from fused f
     join agent_memory.memory_view v on v.id = f.id
     order by f.score desc, v.id
-    limit v_fetch;
+    limit p_limit;
   end if;
 end
 $$;

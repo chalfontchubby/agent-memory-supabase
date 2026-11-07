@@ -73,13 +73,13 @@ select is((select id from agent_memory.search_memories('x', pg_temp.v(2), 'seman
 select ok((select raw_score from agent_memory.search_memories('x', pg_temp.v(1), 'semantic', null, null, null, null, null, 10) limit 1) > 0.49,
   'semantic score is 1/(1+distance)');
 
--- hybrid: gamma note matches only the vector arm, midnight memory only the keyword arm (limit 1 -> 3 per arm)
-select ok(exists (select 1 from agent_memory.search_memories('charge window', pg_temp.v(4), 'hybrid', null, null, null, null, null, 1)
+-- hybrid: gamma note matches only the vector arm, midnight memory only the keyword arm (limit 3)
+select ok(exists (select 1 from agent_memory.search_memories('charge window', pg_temp.v(4), 'hybrid', null, null, null, null, null, 3)
                   where id = 'cccccccc-0000-0000-0000-000000000004'), 'hybrid includes row found only by semantic arm');
-select ok(exists (select 1 from agent_memory.search_memories('charge window', pg_temp.v(4), 'hybrid', null, null, null, null, null, 1)
+select ok(exists (select 1 from agent_memory.search_memories('charge window', pg_temp.v(4), 'hybrid', null, null, null, null, null, 3)
                   where id = 'aaaaaaaa-0000-0000-0000-000000000001'), 'hybrid includes row found only by keyword arm');
-select ok((select count(*) from agent_memory.search_memories('charge window', pg_temp.v(4), 'hybrid', null, null, null, null, null, 1)) <= 3,
-  'hybrid returns at most limit * 3 rows');
+select is((select count(*) from agent_memory.search_memories('charge window', pg_temp.v(1), 'hybrid', null, null, null, null, null, 2)), 2::bigint,
+  'hybrid with p_limit 2 returns exactly 2 although more rows match');
 
 -- filters
 select ok(not exists (select 1 from agent_memory.search_memories('x', pg_temp.v(1), 'semantic', null, 'learning', null, null, null, 20)
