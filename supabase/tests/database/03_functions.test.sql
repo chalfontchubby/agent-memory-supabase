@@ -2,8 +2,6 @@ begin;
 create extension if not exists pgtap with schema extensions;
 select plan(29);
 
-grant usage on schema extensions to agent_memory_member;
-
 insert into agent_memory.scopes (id, name) values
   ('a0000000-0000-0000-0000-00000000000a', 'alpha'),
   ('b0000000-0000-0000-0000-00000000000b', 'beta'),

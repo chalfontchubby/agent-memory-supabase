@@ -2,9 +2,6 @@ begin;
 create extension if not exists pgtap with schema extensions;
 select plan(36);
 
--- pgTAP runs inside the member role below, so let it reach the extensions schema (rolled back).
-grant usage on schema extensions to agent_memory_member;
-
 -- Fixtures (as postgres)
 insert into agent_memory.scopes (id, name) values
   ('a0000000-0000-0000-0000-00000000000a', 'alpha'),
