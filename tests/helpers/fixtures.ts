@@ -51,6 +51,8 @@ export async function makeWorld(sql: AdminSql): Promise<World> {
     async cleanup() {
       const scopeIds = [alpha.id, beta.id];
       const memberIds = [rw.id, ro.id, none.id, bw.id];
+      // Threads first (posts, links and subscriptions cascade); sessions cascade with members.
+      await sql`delete from agent_memory.threads where scope_id = any(${scopeIds}::uuid[])`;
       // The history trigger writes a 'purge' row on delete, so clear history after the memories.
       const gone = await sql`delete from agent_memory.memories where scope_id = any(${scopeIds}::uuid[]) returning id`;
       await sql`delete from agent_memory.memory_history where memory_id = any(${gone.map((r) => r.id)}::uuid[])`;
