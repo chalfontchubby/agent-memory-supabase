@@ -4,6 +4,7 @@ import { assert, assertEquals, assertStringIncludes } from '@std/assert';
 import { Client, StreamableHTTPClientTransport } from 'npm:@modelcontextprotocol/client@2.4.0';
 import { adminSql, makeWorld, type World } from '../helpers/fixtures.ts';
 import { generateToken, hashToken } from '../../supabase/functions/_shared/tokens.ts';
+import { setAdmin } from '../../scripts/lib/admin-db.ts';
 
 const URL_ = Deno.env.get('FUNCTION_URL') ?? 'http://127.0.0.1:54321/functions/v1/agent-memory';
 
@@ -31,6 +32,16 @@ async function post(headers: Record<string, string>, path = '', body: unknown = 
   return { status: res.status, body: out };
 }
 
+/** What a caller sees when it calls a tool: the thrown protocol error, or the tool-error text. */
+async function callOutcome(c: Client, name: string, args: Record<string, unknown>): Promise<string> {
+  try {
+    const r = await c.callTool({ name, arguments: args });
+    return `result:${r.isError ? 'error:' : ''}${text(r)}`;
+  } catch (e) {
+    return `thrown:${e instanceof Error ? e.message : e}`;
+  }
+}
+
 Deno.test('edge function end-to-end over MCP', async () => {
   const sql = adminSql();
   let w: World | undefined;
@@ -47,6 +58,10 @@ Deno.test('edge function end-to-end over MCP', async () => {
     clients.push(c);
     return c;
   };
+  const sfx = crypto.randomUUID().slice(0, 8);
+  const adminName = `e2e-admin-${sfx}`;
+  const newName = `e2e-new-${sfx}`;
+  const newScope = `e2e-scope-${sfx}`;
   try {
     const world = await makeWorld(sql);
     w = world;
@@ -156,6 +171,62 @@ Deno.test('edge function end-to-end over MCP', async () => {
       assertEquals(parse(await c.callTool({ name: 'list_scopes', arguments: {} })), { count: 0, scopes: [] });
     });
 
+    await t('admin token sees 23 tools; non-admin and bot see the 11 originals', async () => {
+      const [a] = await sql`
+        insert into agent_memory.members (display_name, kind) values (${adminName}, 'human') returning id`;
+      await setAdmin(sql, adminName, true);
+      const admin = await issue(a.id);
+      const names = async (tok: string) => (await (await open(tok)).listTools()).tools.map((x) => x.name);
+      const adminTools = await names(admin.token);
+      assertEquals(adminTools.length, 23);
+      assertEquals(adminTools.filter((n) => n.startsWith('admin_')).length, 12);
+      const base = await names(rw.token);
+      assertEquals(base.length, 11);
+      assert(!base.some((n) => n.startsWith('admin_')));
+      assertEquals(await names(none.token), base);
+      const bot = await issue(world.bw.id);
+      assertEquals(await names(bot.token), base);
+      assertEquals(adminTools.slice(0, 11), base);
+    });
+
+    await t('non-admin calling admin_create_scope gets the unknown-tool error', async () => {
+      const c = await open(rw.token);
+      const a = await callOutcome(c, 'admin_create_scope', { name: newScope });
+      const b = await callOutcome(c, 'no_such_tool', { name: newScope });
+      assertEquals(a.replace('admin_create_scope', 'X'), b.replace('no_such_tool', 'X'));
+      const [row] = await sql`select 1 from agent_memory.scopes where name = ${newScope}`;
+      assertEquals(row, undefined);
+    });
+
+    await t('admin onboards a member over MCP; deactivation ends their access', async () => {
+      const [a] = await sql`select id from agent_memory.members where display_name = ${adminName}`;
+      const admin = await open((await issue(a.id)).token);
+      const ok = async (name: string, args: Record<string, unknown>) => {
+        const r = await admin.callTool({ name, arguments: args });
+        assert(!r.isError, `${name}: ${text(r)}`);
+        return parse(r);
+      };
+      await ok('admin_create_member', { name: newName, kind: 'human' });
+      await ok('admin_grant', { member: newName, scope: world.alpha.name, access: 'read' });
+      const issued = await ok('admin_issue_token', { member: newName, name: 'e2e' });
+      assert(typeof issued.token === 'string' && issued.token.startsWith('amm_'));
+
+      const nc = await open(issued.token);
+      const scopes = parse(await nc.callTool({ name: 'list_scopes', arguments: {} }));
+      assertEquals(scopes.count, 1);
+      assertEquals(scopes.scopes[0].scope, world.alpha.name);
+      assertEquals(scopes.scopes[0].access, 'read');
+      assertEquals((await nc.listTools()).tools.length, 11);
+
+      await ok('admin_deactivate_member', { name: newName });
+      const r = await post({ authorization: `Bearer ${issued.token}` }, '', {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/list',
+      });
+      assertEquals(r.status, 401);
+    });
+
     await t('/embed rejects oversize and malformed bodies', async () => {
       const auth = { authorization: `Bearer ${rw.token}` };
       const big = await post(auth, '/embed', { text: 'x'.repeat(20_001) });
@@ -181,6 +252,15 @@ Deno.test('edge function end-to-end over MCP', async () => {
   } finally {
     try {
       for (const c of clients) await c.close().catch(() => {});
+      // Members this test created (the admin and the onboarded one), with their tokens, grants and log rows.
+      const created = await sql`select id from agent_memory.members where display_name in (${adminName}, ${newName})`;
+      const ids = created.map((r) => r.id as string);
+      await sql`delete from agent_memory.admin_log
+        where actor_member_id = any(${ids}::uuid[]) or target in (${adminName}, ${newName}, ${newScope})
+          or details->>'member' in (${adminName}, ${newName})`;
+      await sql`delete from agent_memory.access_tokens where member_id = any(${ids}::uuid[])`;
+      await sql`delete from agent_memory.scope_grants where member_id = any(${ids}::uuid[])`;
+      await sql`delete from agent_memory.members where id = any(${ids}::uuid[])`;
       await w?.cleanup();
     } finally {
       await sql.end();

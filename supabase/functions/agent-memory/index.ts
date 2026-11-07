@@ -1,6 +1,8 @@
 import 'jsr:@supabase/functions-js@2/edge-runtime.d.ts';
 import { createMcpHandler, McpServer } from 'npm:@modelcontextprotocol/server@2.4.0';
-import { connect, resolveMember } from '../_shared/db.ts';
+import { type Caller, connect, resolveCaller } from '../_shared/db.ts';
+import { PgAdminStore } from '../_shared/admin-store.ts';
+import { registerAdminTools } from '../_shared/admin-tools.ts';
 import { GteSmallEmbedder } from '../_shared/embedder.ts';
 import { MAX_CONTENT_CHARS } from '../_shared/limits.ts';
 import { PgMemoryStore } from '../_shared/pg-store.ts';
@@ -20,21 +22,22 @@ const tooLarge = () => Response.json({ error: 'text too large' }, { status: 413 
 const unauthorized = () => Response.json({ error: 'invalid or missing token' }, { status: 401 });
 
 /** Identity comes only from the bearer token: nothing else in the request can name a member. */
-async function authenticate(req: Request): Promise<string | null> {
+async function authenticate(req: Request): Promise<Caller | null> {
   const m = /^Bearer\s+(\S+)$/i.exec(req.headers.get('authorization') ?? '');
-  return m ? await resolveMember(sql, m[1]) : null;
+  return m ? await resolveCaller(sql, m[1]) : null;
 }
 
 async function handle(req: Request): Promise<Response> {
-  let memberId: string | null;
+  let caller: Caller | null;
   try {
-    memberId = await authenticate(req);
+    caller = await authenticate(req);
   } catch (e) {
     const err = e as { code?: string; message?: string };
     console.error('auth lookup failed', err.code, err.message);
     return Response.json({ error: 'service unavailable' }, { status: 503 });
   }
-  if (!memberId) return unauthorized();
+  if (!caller) return unauthorized();
+  const { memberId, isAdmin } = caller;
 
   const path = new URL(req.url).pathname.replace(/\/+$/, '');
   if (req.method === 'POST' && path.endsWith('/embed')) {
@@ -64,6 +67,7 @@ async function handle(req: Request): Promise<Response> {
   const mcp = createMcpHandler(() => {
     const s = new McpServer({ name: 'agent-memory-supabase', version: VERSION });
     registerTools(s, store, embedder);
+    if (isAdmin) registerAdminTools(s, new PgAdminStore(sql, memberId));
     return s;
   }, { onerror: (e) => console.error('mcp error', e) });
   return await mcp.fetch(req);

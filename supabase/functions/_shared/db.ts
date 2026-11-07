@@ -7,12 +7,25 @@ export function connect(url: string): Sql {
   return postgres(url, { max: 3, prepare: false });
 }
 
-/** Resolve a bearer token to a member id, or null. Malformed tokens never reach the database. */
-export async function resolveMember(sql: Sql, token: string): Promise<string | null> {
+export interface Caller {
+  memberId: string;
+  isAdmin: boolean;
+}
+
+/** Resolve a bearer token to its member and admin flag, or null. Malformed tokens never reach the database. */
+export async function resolveCaller(sql: Sql, token: string): Promise<Caller | null> {
   if (!looksLikeToken(token)) return null;
   const hash = await hashToken(token);
-  const rows = await sql<{ id: string | null }[]>`select agent_memory.resolve_token(${hash}) as id`;
-  return rows[0]?.id ?? null;
+  const rows = await sql<
+    { member_id: string | null; is_admin: boolean | null }[]
+  >`select member_id, is_admin from agent_memory.resolve_member(${hash})`;
+  const r = rows[0];
+  return r?.member_id ? { memberId: r.member_id, isAdmin: r.is_admin === true } : null;
+}
+
+/** Resolve a bearer token to a member id, or null. */
+export async function resolveMember(sql: Sql, token: string): Promise<string | null> {
+  return (await resolveCaller(sql, token))?.memberId ?? null;
 }
 
 /** Run `fn` in a transaction that acts as the member, so RLS applies. */
