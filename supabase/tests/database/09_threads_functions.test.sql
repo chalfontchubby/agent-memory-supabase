@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(60);
+select plan(63);
 
 -- Fixtures (as postgres): w writes s1, r reads s1, o has no grants. s3 is granted to nobody.
 insert into agent_memory.scopes (id, name) values
@@ -127,6 +127,21 @@ select is((select count(*) from agent_memory.thread_links where thread_id = (sel
 select ok(agent_memory.unlink_memory((select id from t1), 'aaaaaaaa-0000-0000-0000-000000000001'), 'unlink returns true');
 select ok(not agent_memory.unlink_memory((select id from t1), 'aaaaaaaa-0000-0000-0000-000000000001'), 'unlink again returns false');
 select ok(agent_memory.unsubscribe((select id from t1), '51111111-0000-0000-0000-00000000000c'), 'unsubscribe returns true');
+
+-- unlink must not reveal or remove links to memories the caller cannot read
+reset role;
+insert into agent_memory.thread_links (thread_id, memory_id, linked_by)
+select id, 'aaaaaaaa-0000-0000-0000-000000000003', '11111111-1111-1111-1111-111111111111' from t1;
+select set_config('agent_memory.member_id', '11111111-1111-1111-1111-111111111111', true);
+set local role agent_memory_member;
+select throws_ok(format('select agent_memory.unlink_memory(%L, %L)', (select id from t1), 'aaaaaaaa-0000-0000-0000-000000000003'),
+  'P0001', 'Memory aaaaaaaa-0000-0000-0000-000000000003 not found', 'unlink of unreadable memory raises');
+select throws_ok(format('select agent_memory.unlink_memory(%L, %L)', (select id from t1), 'aaaaaaaa-0000-0000-0000-0000000000ff'),
+  'P0001', 'Memory aaaaaaaa-0000-0000-0000-0000000000ff not found', 'unlink of made-up memory raises the same text');
+reset role;
+select is((select count(*) from agent_memory.thread_links where memory_id = 'aaaaaaaa-0000-0000-0000-000000000003'), 1::bigint, 'unreadable link still exists');
+select set_config('agent_memory.member_id', '11111111-1111-1111-1111-111111111111', true);
+set local role agent_memory_member;
 
 -- Sessions
 select is((select count(*) from agent_memory.agent_sessions where member_id = '11111111-1111-1111-1111-111111111111'), 3::bigint, 'baseline session count');

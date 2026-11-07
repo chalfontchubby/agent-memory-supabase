@@ -511,6 +511,7 @@ declare
   v_n int;
 begin
   perform agent_memory.require_thread_write(p_thread);
+  perform agent_memory.require_memory_readable(p_memory);
   delete from agent_memory.thread_links l where l.thread_id = p_thread and l.memory_id = p_memory;
   get diagnostics v_n = row_count;
   return v_n > 0;
