@@ -91,7 +91,7 @@ Deno.test('update with only tags/category keeps content and embedding', () =>
 
 Deno.test('update scope moves memory, needs write on both', () =>
   withWorld(async (w, admin, mk) => {
-    const [s] = mk(w.rw.id);
+    const [s, e] = mk(w.rw.id);
     const m = await s.store(w.alpha.name, req('movable'));
     await assertRejects(() => s.update(m.id, { scope: w.beta.name }), Error, `Scope '${w.beta.name}' not found`);
     await admin`insert into agent_memory.scope_grants (scope_id, member_id, access)
@@ -102,9 +102,26 @@ Deno.test('update scope moves memory, needs write on both', () =>
       `No write access to scope '${w.beta.name}'`,
     );
     await admin`update agent_memory.scope_grants set access = 'write' where scope_id = ${w.beta.id} and member_id = ${w.rw.id}`;
+    const before = await embOf(admin, m.id);
+    const calls = e.calls;
     const moved = await s.update(m.id, { scope: w.beta.name });
     assertEquals(moved.scope, w.beta.name);
     assertEquals(moved.content, 'movable');
+    assertEquals(await embOf(admin, m.id), before);
+    assertEquals(e.calls, calls);
+  }));
+
+Deno.test('update with unchanged content and new tags writes no content and no embedding', () =>
+  withWorld(async (w, admin, mk) => {
+    const [s, e] = mk(w.rw.id);
+    const m = await s.store(w.alpha.name, req('same words', ['a']));
+    const before = await embOf(admin, m.id);
+    const calls = e.calls;
+    const u = await s.update(m.id, { content: 'same words', tags: ['b'] });
+    assertEquals(u.tags, ['b']);
+    assertEquals(u.content, 'same words');
+    assertEquals(await embOf(admin, m.id), before);
+    assertEquals(e.calls, calls);
   }));
 
 Deno.test('update content: same -> no embed; new -> one embed and fts finds it', () =>

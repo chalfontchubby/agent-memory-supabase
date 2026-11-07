@@ -151,16 +151,19 @@ export class PgMemoryStore implements MemoryStore {
   async update(id: string, u: UpdateRequest): Promise<Memory> {
     // Read current state first so we know whether to embed (outside the write transaction).
     const current = await this.run((tx) => this.visibleWritable(tx, id));
+    // Content is only written together with its embedding: if no embed is needed, leave the column untouched.
     let embedding: string | null = null;
+    let newContent: string | null = null;
     if (u.content !== undefined && u.content !== current.content) {
       embedding = vec(await this.embedder.embed(u.content));
+      newContent = u.content;
     }
     return await this.run(async (tx) => {
       await this.visibleWritable(tx, id);
       const targetScope = u.scope !== undefined ? await this.writableScope(tx, u.scope) : null;
       const upd = await tx<Row[]>`
         update agent_memory.memories set
-          content = coalesce(${u.content ?? null}::text, content),
+          content = coalesce(${newContent}::text, content),
           category = coalesce(${u.category ?? null}::text, category),
           tags = coalesce(${u.tags ? tx.array(u.tags) : null}::text[], tags),
           scope_id = coalesce(${targetScope}::uuid, scope_id),
