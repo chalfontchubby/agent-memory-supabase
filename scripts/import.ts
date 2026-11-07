@@ -1,6 +1,7 @@
 import { parseArgs } from 'jsr:@std/cli@1.0.9/parse-args';
 import { connect } from '../supabase/functions/_shared/db.ts';
 import type { Sql } from '../supabase/functions/_shared/db.ts';
+import { MAX_CONTENT_CHARS } from '../supabase/functions/_shared/limits.ts';
 
 /** One memory as written by scripts/lancedb-export/export.mjs. */
 export interface ImportedMemory {
@@ -135,6 +136,7 @@ const validTime = (v: unknown): v is string => typeof v === 'string' && !isNaN(D
 
 function invalidReason(m: ImportedMemory): string | null {
   if (typeof m.content !== 'string' || m.content.trim() === '') return 'empty content';
+  if (m.content.length > MAX_CONTENT_CHARS) return `content too long (max ${MAX_CONTENT_CHARS} characters)`;
   if (!CATEGORIES.includes(m.category)) return `invalid category '${m.category}'`;
   if (!/^[0-9a-f-]{36}$/i.test(String(m.id))) return 'invalid id';
   if (!Array.isArray(m.tags) || m.tags.some((t) => typeof t !== 'string')) return 'invalid tags';

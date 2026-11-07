@@ -1,6 +1,6 @@
 import { z } from 'npm:zod@4.6.7';
 import type { McpServer } from 'npm:@modelcontextprotocol/server@2.4.0';
-import { RECALL_EMBED_TOPICS_MAX } from './limits.ts';
+import { checkLimit, RECALL_EMBED_TOPICS_MAX, STORE_BATCH_MAX } from './limits.ts';
 import {
   type Embedder,
   MEMORY_CATEGORIES,
@@ -124,6 +124,9 @@ export function handleRecall(store: MemoryStore, embedder: Embedder) {
       const limit = args.limit_per_topic ?? 5;
       const includeRecent = args.include_recent ?? 5;
       const scopes = scopesOrUndefined(args.scopes);
+      // Validate before embedding, so a bad argument costs no CPU.
+      checkLimit(limit);
+      if (includeRecent > 0) checkLimit(includeRecent);
 
       const embedTopics = args.topics.slice(0, RECALL_EMBED_TOPICS_MAX);
       const keywordOnlyTopics = args.topics.slice(RECALL_EMBED_TOPICS_MAX);
@@ -138,7 +141,8 @@ export function handleRecall(store: MemoryStore, embedder: Embedder) {
         byTopic[topic] = await store.search(topic, 'hybrid', { limit, scopes }, null);
       }
 
-      const recent = await store.listRecent(includeRecent, undefined, scopes);
+      // include_recent <= 0 means no recent memories, as in the original server.
+      const recent = includeRecent > 0 ? await store.listRecent(includeRecent, undefined, scopes) : [];
       return success(keywordOnlyTopics.length > 0 ? { byTopic, recent, keywordOnlyTopics } : { byTopic, recent });
     } catch (err) {
       return error('Recall failed', err);
@@ -248,7 +252,7 @@ export function registerTools(server: McpServer, store: MemoryStore, embedder: E
 
   server.registerTool('store_batch', {
     description:
-      'Store multiple memories in one call. Use at end-of-session to capture everything learnt. Returns all stored memories.',
+      `Store multiple memories in one call. Use at end-of-session to capture everything learnt. Returns all stored memories. Accepts at most ${STORE_BATCH_MAX} memories per call on this server; split larger batches.`,
     inputSchema: z.object({
       scope: z.string().describe('Scope to store the memories in (you need write access)'),
       memories: z.array(z.object({

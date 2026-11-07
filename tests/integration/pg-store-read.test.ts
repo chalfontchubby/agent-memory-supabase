@@ -125,7 +125,7 @@ Deno.test('invalid mode or limit never surfaces driver text', () =>
   withWorld(async (w, _a, mk) => {
     const [s] = mk(w.rw.id);
     await assertRejects(() => s.search('x', 'bogus' as never, {}), Error, 'Invalid search mode');
-    await assertRejects(() => s.search('x', 'keyword', { limit: 0 }), Error, 'Invalid limit');
+    await assertRejects(() => s.search('x', 'keyword', { limit: 0 }), Error, 'limit must be between 1 and 100');
   }));
 
 Deno.test('access tracking: once per hour, updated_at untouched', () =>
@@ -161,7 +161,7 @@ Deno.test('findRelated: excludes source, scoped, unreadable id not found, no emb
     assertEquals(e.calls, calls);
     await assertRejects(() => rw.findRelated(far.id, 5), Error, `Memory ${far.id} not found`);
     await assertRejects(() => rw.findRelated('not-a-uuid', 5), Error, 'Memory not-a-uuid not found');
-    await assertRejects(() => rw.findRelated(src.id, 0), Error, 'Invalid limit');
+    await assertRejects(() => rw.findRelated(src.id, 0), Error, 'limit must be between 1 and 100');
   }));
 
 Deno.test('stats: scoped counts, byScope, none gets zeros', () =>
@@ -210,7 +210,7 @@ Deno.test('listRecent orders newest first, filters category and scope', () =>
     assertEquals((await rw.listRecent(10, 'learning')).map((m) => m.id), [a.id]);
     assertEquals((await rw.listRecent(10, undefined, [w.alpha.name])).length, 2);
     assertEquals(await mk(w.none.id)[0].listRecent(10), []);
-    await assertRejects(() => rw.listRecent(0), Error, 'Invalid limit');
+    await assertRejects(() => rw.listRecent(0), Error, 'limit must be between 1 and 100');
   }));
 
 Deno.test('soft-deleted memories are invisible to every read', () =>
@@ -269,4 +269,20 @@ Deno.test('stats and prune agree when decay is disabled', () =>
     // Decay disabled: prune treats every non-evergreen memory as a candidate, and stats must say the same.
     assertEquals(dry.candidates.length, 2);
     assertEquals((await s.stats()).belowPruneThreshold, 2);
+  }));
+
+Deno.test('limits above 100 are rejected on every read; 100 is accepted', () =>
+  withWorld(async (w, _a, mk) => {
+    const [s, e] = mk(w.rw.id);
+    const src = await s.store(w.alpha.name, req('okapi field notes'));
+    const calls = e.calls;
+    const msg = 'limit must be between 1 and 100';
+    await assertRejects(() => s.search('okapi', 'hybrid', { limit: 101 }), Error, msg);
+    assertEquals(e.calls, calls);
+    await assertRejects(() => s.search('okapi', 'keyword', { limit: 2.5 }), Error, msg);
+    await assertRejects(() => s.findRelated(src.id, 101), Error, msg);
+    await assertRejects(() => s.listRecent(101), Error, msg);
+    assertEquals((await s.search('okapi', 'keyword', { limit: 100 })).length, 1);
+    assertEquals((await s.findRelated(src.id, 100)).length, 0);
+    assertEquals((await s.listRecent(100)).length, 1);
   }));

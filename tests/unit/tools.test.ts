@@ -197,3 +197,41 @@ Deno.test('registerTools registers exactly 11 tools', () => {
     ],
   );
 });
+
+Deno.test('handleRecall with include_recent 0 returns recent [] without listing', async () => {
+  const { store, calls } = mockStore();
+  const { embedder } = mockEmbedder();
+  for (const n of [0, -1]) {
+    const r = await handleRecall(store, embedder)({ topics: ['a'], include_recent: n });
+    assert(!('isError' in r));
+    assertEquals(JSON.parse(r.content[0].text).recent, []);
+  }
+  assertEquals(calls.listRecent, undefined);
+});
+
+Deno.test('handleRecall rejects a bad limit_per_topic before embedding', async () => {
+  const { store, calls } = mockStore();
+  const { embedder, manyCalls } = mockEmbedder();
+  for (const n of [0, 101]) {
+    const r = await handleRecall(store, embedder)({ topics: ['a', 'b'], limit_per_topic: n });
+    assertEquals((r as { isError?: boolean }).isError, true);
+    assertEquals(r.content[0].text, 'Recall failed: limit must be between 1 and 100');
+  }
+  const r = await handleRecall(store, embedder)({ topics: ['a'], include_recent: 101 });
+  assertEquals(r.content[0].text, 'Recall failed: limit must be between 1 and 100');
+  assertEquals(manyCalls, []);
+  assertEquals(calls.search, undefined);
+});
+
+Deno.test('store_batch description states the per-call cap', () => {
+  const { store } = mockStore();
+  const { embedder } = mockEmbedder();
+  const server = new McpServer({ name: 'test', version: '0.0.0' });
+  registerTools(server, store, embedder);
+  const registered = (server as unknown as { _registeredTools: Record<string, { description?: string }> })
+    ._registeredTools;
+  assertStringIncludes(
+    registered.store_batch.description ?? '',
+    `at most ${STORE_BATCH_MAX} memories per call on this server; split larger batches.`,
+  );
+});

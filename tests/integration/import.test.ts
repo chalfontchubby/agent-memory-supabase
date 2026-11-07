@@ -74,9 +74,14 @@ Deno.test('importMemories: executes against the local stack, retries 546, preser
     const bad: ImportedMemory[] = [
       { ...all[0], id: '55555555-5555-4555-8555-555555555555', category: 'nope' },
       { ...all[0], id: '66666666-6666-4666-8666-666666666666', content: '  ' },
+      { ...all[0], id: '77777777-7777-4777-8777-777777777777', content: 'x'.repeat(20_001) },
     ];
     const first = await importMemories(sql, [...all, ...bad], { ...opts, log: () => {} });
-    assertEquals([first.imported, first.skipped, first.failed], [4, 0, 2]);
+    assertEquals([first.imported, first.skipped, first.failed], [4, 0, 3]);
+    assertEquals(first.failures[2], {
+      id: '77777777-7777-4777-8777-777777777777',
+      reason: 'content too long (max 20000 characters)',
+    });
     assertEquals(delays, [1000, 2000]);
     assertEquals(stub.state.calls, 2 + 4);
     assert(stub.state.auth.every((a) => a === 'Bearer amm_stub'));

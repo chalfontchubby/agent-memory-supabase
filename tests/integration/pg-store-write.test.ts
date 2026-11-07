@@ -225,3 +225,20 @@ Deno.test('listScopes as ro', () =>
       { scope: w.alpha.name, access: 'read', memoryCount: 1, description: null },
     ]);
   }));
+
+Deno.test('content over 20000 characters is rejected before embedding', () =>
+  withWorld(async (w, admin, mk) => {
+    const [s, e] = mk(w.rw.id);
+    const long = 'x'.repeat(20_001);
+    const msg = 'content too long (max 20000 characters)';
+    await assertRejects(() => s.store(w.alpha.name, req(long)), Error, msg);
+    await assertRejects(() => s.storeBatch(w.alpha.name, [req('ok'), req(long)]), Error, msg);
+    assertEquals(e.calls, 0);
+    const m = await s.store(w.alpha.name, req('word '.repeat(4_000)));
+    assertEquals(m.content.length, 20_000);
+    const calls = e.calls;
+    await assertRejects(() => s.update(m.id, { content: long }), Error, msg);
+    assertEquals(e.calls, calls);
+    const [r] = await admin`select count(*)::int as n from agent_memory.memories where scope_id = ${w.alpha.id}`;
+    assertEquals(r.n, 1);
+  }));

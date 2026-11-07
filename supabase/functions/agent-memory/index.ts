@@ -2,6 +2,7 @@ import 'jsr:@supabase/functions-js@2/edge-runtime.d.ts';
 import { createMcpHandler, McpServer } from 'npm:@modelcontextprotocol/server@2.4.0';
 import { connect, resolveMember } from '../_shared/db.ts';
 import { GteSmallEmbedder } from '../_shared/embedder.ts';
+import { MAX_CONTENT_CHARS } from '../_shared/limits.ts';
 import { PgMemoryStore } from '../_shared/pg-store.ts';
 import { registerTools } from '../_shared/tools.ts';
 
@@ -14,7 +15,6 @@ const sql = connect(dbUrl);
 const embedder = new GteSmallEmbedder();
 
 const EMBED_MAX_BYTES = 64 * 1024;
-const EMBED_MAX_CHARS = 20_000;
 const tooLarge = () => Response.json({ error: 'text too large' }, { status: 413 });
 
 const unauthorized = () => Response.json({ error: 'invalid or missing token' }, { status: 401 });
@@ -48,7 +48,7 @@ async function handle(req: Request): Promise<Response> {
     } catch {
       body = null;
     }
-    if (typeof body?.text === 'string' && body.text.length > EMBED_MAX_CHARS) return tooLarge();
+    if (typeof body?.text === 'string' && body.text.length > MAX_CONTENT_CHARS) return tooLarge();
     if (!body || typeof body.text !== 'string' || body.text === '') {
       return Response.json({ error: 'text is required' }, { status: 400 });
     }

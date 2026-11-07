@@ -2,11 +2,14 @@ import type postgres from 'npm:postgres@3.4.5';
 import { type Sql, withMember } from './db.ts';
 import { applyDecay, importanceMultiplier, isEvergreen, parseDecayHalfLife } from './decay.ts';
 import {
+  checkContent,
+  checkLimit,
   DEFAULT_LIMIT,
   OVER_FETCH_FACTOR,
   PRUNE_MAX_DORMANT_DAYS_DEFAULT,
   PRUNE_MIN_STRENGTH_DEFAULT,
   STORE_BATCH_MAX,
+  StoreError,
 } from './limits.ts';
 import type {
   Embedder,
@@ -30,8 +33,6 @@ const MS_PER_DAY = 86_400_000;
 // deno-lint-ignore no-explicit-any
 type Row = Record<string, any>;
 
-class StoreError extends Error {}
-
 const iso = (v: Date | string): string => (v instanceof Date ? v.toISOString() : new Date(v).toISOString());
 
 export function rowToMemory(r: Row): Memory {
@@ -49,9 +50,6 @@ export function rowToMemory(r: Row): Memory {
 }
 
 const SEARCH_MODES: readonly string[] = ['hybrid', 'keyword', 'semantic'];
-function checkLimit(n: number): void {
-  if (!Number.isInteger(n) || n < 1) throw new Error('Invalid limit');
-}
 const vec = (e: number[]): string => JSON.stringify(e);
 const notFoundMemory = (id: string) => new StoreError(`Memory ${id} not found`);
 const noWrite = (scope: string) => new StoreError(`No write access to scope '${scope}'`);
@@ -122,6 +120,7 @@ export class PgMemoryStore implements MemoryStore {
           `split the batch or call store for each memory.`,
       );
     }
+    for (const r of rs) checkContent(r.content);
     // Embed (sequentially) before opening the transaction.
     const embeddings: number[][] = [];
     for (const r of rs) embeddings.push(await this.embedder.embed(r.content));
@@ -160,6 +159,7 @@ export class PgMemoryStore implements MemoryStore {
   }
 
   async update(id: string, u: UpdateRequest): Promise<Memory> {
+    if (u.content !== undefined) checkContent(u.content);
     // Read current state first so we know whether to embed (outside the write transaction).
     const current = await this.run((tx) => this.visibleWritable(tx, id));
     // Content is only written together with its embedding: if no embed is needed, leave the column untouched.
