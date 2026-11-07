@@ -309,3 +309,304 @@ begin
   return null;
 end
 $$;
+
+-- ===== 6. Thread write and poll functions =====
+-- Every member-callable function checks owns_session for p_session and can_read_thread / can_write_thread for the
+-- thread, with identical "not found" text whether a thing is absent, unreadable or another member's.
+-- append_post is private: only the functions below call it (definer to definer).
+
+create function agent_memory.append_post(p_thread uuid, p_kind text, p_body text, p_session uuid)
+returns int
+language plpgsql security definer set search_path = ''
+as $$
+declare
+  v_seq int;
+begin
+  -- The row lock serialises concurrent posters, so seq = post_count + 1 never collides.
+  select t.post_count + 1 into v_seq from agent_memory.threads t where t.id = p_thread for update;
+  update agent_memory.threads t set post_count = v_seq, last_post_at = pg_catalog.now() where t.id = p_thread;
+  insert into agent_memory.thread_posts (thread_id, seq, kind, body, author_id, session_id)
+  values (p_thread, v_seq, p_kind, p_body, agent_memory.current_member_id(), p_session);
+  if p_session is not null then
+    -- Posting subscribes at the new seq, but never moves an existing marker.
+    insert into agent_memory.thread_subscriptions (session_id, thread_id, last_seen_seq)
+    values (p_session, p_thread, v_seq)
+    on conflict do nothing;
+  end if;
+  return v_seq;
+end
+$$;
+
+-- Shared guards. Raise the spec texts; return nothing.
+create function agent_memory.require_session(p_session uuid) returns void
+language plpgsql stable security definer set search_path = ''
+as $$
+begin
+  if p_session is not null and not agent_memory.owns_session(p_session) then
+    raise exception 'Session not found';
+  end if;
+end
+$$;
+
+create function agent_memory.require_thread_read(p_thread uuid) returns void
+language plpgsql stable security definer set search_path = ''
+as $$
+begin
+  if p_thread is null or not agent_memory.can_read_thread(p_thread) then
+    raise exception 'Thread % not found', p_thread;
+  end if;
+end
+$$;
+
+create function agent_memory.require_thread_write(p_thread uuid) returns void
+language plpgsql stable security definer set search_path = ''
+as $$
+declare
+  v_name text;
+begin
+  perform agent_memory.require_thread_read(p_thread);
+  if not agent_memory.can_write_thread(p_thread) then
+    select s.name into v_name from agent_memory.threads t
+    join agent_memory.scopes s on s.id = t.scope_id where t.id = p_thread;
+    raise exception 'No write access to scope ''%''', v_name;
+  end if;
+end
+$$;
+
+create function agent_memory.require_memory_readable(p_memory uuid) returns void
+language plpgsql stable security definer set search_path = ''
+as $$
+begin
+  if p_memory is null or not exists (
+    select 1 from agent_memory.memories m
+    where m.id = p_memory and m.deleted_at is null and agent_memory.can_read(m.scope_id)
+  ) then
+    raise exception 'Memory % not found', p_memory;
+  end if;
+end
+$$;
+
+create function agent_memory.create_thread(
+  p_scope_id uuid, p_title text, p_body text, p_memory_ids uuid[], p_session uuid
+) returns uuid
+language plpgsql security definer set search_path = ''
+as $$
+declare
+  v_name text;
+  v_title text := pg_catalog.btrim(coalesce(p_title, ''));
+  v_body text := pg_catalog.btrim(coalesce(p_body, ''));
+  v_id uuid;
+  v_mem uuid;
+begin
+  perform agent_memory.require_session(p_session);
+  if p_scope_id is null or not agent_memory.can_read(p_scope_id) then
+    raise exception 'Scope ''%'' not found', p_scope_id;
+  end if;
+  if not agent_memory.can_write(p_scope_id) then
+    select s.name into v_name from agent_memory.scopes s where s.id = p_scope_id;
+    raise exception 'No write access to scope ''%''', v_name;
+  end if;
+  if pg_catalog.length(v_title) not between 1 and 200 then
+    raise exception 'Title must be 1-200 characters';
+  end if;
+  if pg_catalog.length(v_body) > 20000 then
+    raise exception 'content too long (max 20000 characters)';
+  end if;
+  foreach v_mem in array coalesce(p_memory_ids, '{}'::uuid[]) loop
+    perform agent_memory.require_memory_readable(v_mem);
+  end loop;
+
+  insert into agent_memory.threads (scope_id, title, created_by, created_session)
+  values (p_scope_id, v_title, agent_memory.current_member_id(), p_session)
+  returning id into v_id;
+
+  if v_body <> '' then
+    perform agent_memory.append_post(v_id, 'post', v_body, p_session);
+  end if;
+  foreach v_mem in array coalesce(p_memory_ids, '{}'::uuid[]) loop
+    insert into agent_memory.thread_links (thread_id, memory_id, linked_by)
+    values (v_id, v_mem, agent_memory.current_member_id())
+    on conflict do nothing;
+  end loop;
+  if p_session is not null then
+    insert into agent_memory.thread_subscriptions (session_id, thread_id, last_seen_seq)
+    select p_session, t.id, t.post_count from agent_memory.threads t where t.id = v_id
+    on conflict do nothing;
+  end if;
+  return v_id;
+end
+$$;
+
+create function agent_memory.post_to_thread(p_thread uuid, p_body text, p_session uuid)
+returns int
+language plpgsql security definer set search_path = ''
+as $$
+declare
+  v_body text := pg_catalog.btrim(coalesce(p_body, ''));
+begin
+  perform agent_memory.require_session(p_session);
+  perform agent_memory.require_thread_write(p_thread);
+  if v_body = '' then
+    raise exception 'Post body is empty';
+  end if;
+  if pg_catalog.length(v_body) > 20000 then
+    raise exception 'content too long (max 20000 characters)';
+  end if;
+  return agent_memory.append_post(p_thread, 'post', v_body, p_session);
+end
+$$;
+
+create function agent_memory.set_thread_status(p_thread uuid, p_status text, p_note text, p_session uuid)
+returns int
+language plpgsql security definer set search_path = ''
+as $$
+declare
+  v_note text := pg_catalog.btrim(coalesce(p_note, ''));
+  v_current text;
+  v_seq int;
+begin
+  perform agent_memory.require_session(p_session);
+  perform agent_memory.require_thread_write(p_thread);
+  if p_status is null or p_status not in ('open', 'resolved') then
+    raise exception 'Status must be open or resolved';
+  end if;
+  if pg_catalog.length(v_note) > 20000 then
+    raise exception 'content too long (max 20000 characters)';
+  end if;
+  select t.status into v_current from agent_memory.threads t where t.id = p_thread for update;
+  if p_status = v_current then
+    raise exception 'Thread is already %', p_status;
+  end if;
+  v_seq := agent_memory.append_post(p_thread,
+    case p_status when 'resolved' then 'resolve' else 'reopen' end, v_note, p_session);
+  if p_status = 'resolved' then
+    update agent_memory.threads t
+    set status = 'resolved', resolved_at = pg_catalog.now(), resolved_by = agent_memory.current_member_id()
+    where t.id = p_thread;
+  else
+    update agent_memory.threads t
+    set status = 'open', resolved_at = null, resolved_by = null
+    where t.id = p_thread;
+  end if;
+  return v_seq;
+end
+$$;
+
+create function agent_memory.link_memory(p_thread uuid, p_memory uuid) returns void
+language plpgsql security definer set search_path = ''
+as $$
+begin
+  perform agent_memory.require_thread_write(p_thread);
+  perform agent_memory.require_memory_readable(p_memory);
+  insert into agent_memory.thread_links (thread_id, memory_id, linked_by)
+  values (p_thread, p_memory, agent_memory.current_member_id())
+  on conflict do nothing;
+end
+$$;
+
+create function agent_memory.unlink_memory(p_thread uuid, p_memory uuid) returns boolean
+language plpgsql security definer set search_path = ''
+as $$
+declare
+  v_n int;
+begin
+  perform agent_memory.require_thread_write(p_thread);
+  delete from agent_memory.thread_links l where l.thread_id = p_thread and l.memory_id = p_memory;
+  get diagnostics v_n = row_count;
+  return v_n > 0;
+end
+$$;
+
+create function agent_memory.subscribe(p_thread uuid, p_session uuid) returns void
+language plpgsql security definer set search_path = ''
+as $$
+begin
+  if p_session is null or not agent_memory.owns_session(p_session) then
+    raise exception 'Session not found';
+  end if;
+  perform agent_memory.require_thread_read(p_thread);
+  insert into agent_memory.thread_subscriptions (session_id, thread_id, last_seen_seq)
+  select p_session, t.id, t.post_count from agent_memory.threads t where t.id = p_thread
+  on conflict do nothing;
+end
+$$;
+
+create function agent_memory.unsubscribe(p_thread uuid, p_session uuid) returns boolean
+language plpgsql security definer set search_path = ''
+as $$
+declare
+  v_n int;
+begin
+  if p_session is null or not agent_memory.owns_session(p_session) then
+    raise exception 'Session not found';
+  end if;
+  perform agent_memory.require_thread_read(p_thread);
+  delete from agent_memory.thread_subscriptions s where s.session_id = p_session and s.thread_id = p_thread;
+  get diagnostics v_n = row_count;
+  return v_n > 0;
+end
+$$;
+
+create function agent_memory.mark_seen(p_session uuid, p_thread uuid, p_seq int) returns void
+language plpgsql security definer set search_path = ''
+as $$
+begin
+  if p_session is null or not agent_memory.owns_session(p_session) then
+    raise exception 'Session not found';
+  end if;
+  update agent_memory.thread_subscriptions s
+  set last_seen_seq = greatest(s.last_seen_seq, p_seq)
+  where s.session_id = p_session and s.thread_id = p_thread;
+end
+$$;
+
+create function agent_memory.whats_new(p_session uuid)
+returns table (thread_id uuid, title text, scope text, status text, new_posts int,
+               last_post_at timestamptz, last_author text)
+language plpgsql security definer set search_path = ''
+as $$
+#variable_conflict use_column
+begin
+  if p_session is null or not agent_memory.owns_session(p_session) then
+    raise exception 'Session not found';
+  end if;
+  update agent_memory.agent_sessions s set last_seen_at = pg_catalog.now() where s.id = p_session;
+  return query
+  select t.id, t.title, sc.name, t.status, n.cnt::int, t.last_post_at,
+         (select agent_memory.member_name(p.author_id) from agent_memory.thread_posts p
+          where p.thread_id = t.id order by p.seq desc limit 1)
+  from agent_memory.thread_subscriptions sub
+  join agent_memory.threads t on t.id = sub.thread_id
+  join agent_memory.scopes sc on sc.id = t.scope_id
+  cross join lateral (
+    select pg_catalog.count(*) as cnt from agent_memory.thread_posts p
+    where p.thread_id = t.id and p.seq > sub.last_seen_seq and p.session_id is distinct from p_session
+  ) n
+  where sub.session_id = p_session and agent_memory.can_read_thread(t.id) and n.cnt > 0
+  order by t.last_post_at desc;
+end
+$$;
+
+revoke execute on function agent_memory.append_post(uuid, text, text, uuid) from public;
+revoke execute on function agent_memory.require_session(uuid) from public;
+revoke execute on function agent_memory.require_thread_read(uuid) from public;
+revoke execute on function agent_memory.require_thread_write(uuid) from public;
+revoke execute on function agent_memory.require_memory_readable(uuid) from public;
+revoke execute on function agent_memory.create_thread(uuid, text, text, uuid[], uuid) from public;
+revoke execute on function agent_memory.post_to_thread(uuid, text, uuid) from public;
+revoke execute on function agent_memory.set_thread_status(uuid, text, text, uuid) from public;
+revoke execute on function agent_memory.link_memory(uuid, uuid) from public;
+revoke execute on function agent_memory.unlink_memory(uuid, uuid) from public;
+revoke execute on function agent_memory.subscribe(uuid, uuid) from public;
+revoke execute on function agent_memory.unsubscribe(uuid, uuid) from public;
+revoke execute on function agent_memory.mark_seen(uuid, uuid, int) from public;
+revoke execute on function agent_memory.whats_new(uuid) from public;
+grant execute on function agent_memory.create_thread(uuid, text, text, uuid[], uuid) to agent_memory_member;
+grant execute on function agent_memory.post_to_thread(uuid, text, uuid) to agent_memory_member;
+grant execute on function agent_memory.set_thread_status(uuid, text, text, uuid) to agent_memory_member;
+grant execute on function agent_memory.link_memory(uuid, uuid) to agent_memory_member;
+grant execute on function agent_memory.unlink_memory(uuid, uuid) to agent_memory_member;
+grant execute on function agent_memory.subscribe(uuid, uuid) to agent_memory_member;
+grant execute on function agent_memory.unsubscribe(uuid, uuid) to agent_memory_member;
+grant execute on function agent_memory.mark_seen(uuid, uuid, int) to agent_memory_member;
+grant execute on function agent_memory.whats_new(uuid) to agent_memory_member;
