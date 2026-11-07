@@ -125,6 +125,9 @@ Deno.test('a second run creates nothing new and keeps the token; --new-token rep
     const second = (await readEnvFile(c.env)).get('AGENT_MEMORY_TOKEN')!;
     assert(second !== first);
     assertEquals(await count(), 2);
+    const warn = c.lines.filter((l) => l.includes('revoke-token'));
+    assertEquals(warn.length, 1);
+    assertEquals(warn[0].includes(first), false);
     assert(await resolveId(second));
     assertEquals((await Deno.readTextFile(c.env)).match(/^AGENT_MEMORY_TOKEN=/gm)?.length, 1);
   });

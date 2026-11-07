@@ -3,6 +3,7 @@
 //   deno run -A scripts/setup.ts [--env-file .env] [--scope default] [--member <name>] [--email <addr>] [--bot]
 //     [--new-token] [--skip-deploy] [--configure-claude [--name shared-memory]]
 // Reads SUPABASE_ACCESS_TOKEN, SUPABASE_DB_PASSWORD and SUPABASE_PROJECT_REF from the env file.
+import { fromFileUrl } from 'jsr:@std/path@1.0.8';
 import { parseArgs } from 'jsr:@std/cli@1.0.9/parse-args';
 import { connect, type Sql } from '../supabase/functions/_shared/db.ts';
 import { hashToken } from '../supabase/functions/_shared/tokens.ts';
@@ -108,7 +109,7 @@ export async function setup(o: SetupOptions): Promise<number> {
     await upsertEnvVars(envFile, { AGENT_MEMORY_DB_URL: dbUrl });
 
     // 2-4. link, migrate, deploy.
-    const cwd = new URL('..', import.meta.url).pathname;
+    const cwd = fromFileUrl(new URL('..', import.meta.url));
     const sbEnv = { ...Deno.env.toObject(), SUPABASE_ACCESS_TOKEN: pat, SUPABASE_DB_PASSWORD: password };
     const sb = async (step: string, args: string[]) => {
       const r = await run('supabase', args, { cwd, env: sbEnv });
@@ -158,7 +159,18 @@ export async function setup(o: SetupOptions): Promise<number> {
     let token = current;
     let issued = false;
     if (o.newToken || !current || (await resolveId(sql, current)) !== m.id) {
+      if (current) {
+        const [old] = await sql`
+          select id from agent_memory.access_tokens where token_hash = ${await hashToken(current)}`;
+        if (old && await resolveId(sql, current)) {
+          log(
+            `The previous token in ${envFile} is still live (id ${old.id}); revoke it if unused: ` +
+              `deno run -A scripts/admin.ts revoke-token ${old.id}`,
+          );
+        }
+      }
       token = await issueToken(sql, member, `setup ${new Date().toISOString()}`);
+      secrets.push(token);
       issued = true;
     }
     const url = `https://${ref}.supabase.co/functions/v1/agent-memory`;

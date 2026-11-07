@@ -38,6 +38,12 @@ To register an existing token without re-running setup:
 `deno run -A scripts/configure-claude.ts [--name shared-memory] [--scope user|project]`. Project scope writes the token
 into `.mcp.json`, which is normally committed, so it needs `--yes`; prefer the default `user` scope.
 
+The admin, backup and import scripts read `AGENT_MEMORY_DB_URL` from the environment; load the saved file with
+`deno run --env-file=.env -A scripts/admin.ts list-scopes`.
+
+`configure-claude` passes the token to `claude mcp add` as an argument, and Claude Code stores it in `~/.claude.json`,
+as with any MCP header.
+
 The manual steps follow, if you prefer to run each yourself.
 
 ### Install by hand
