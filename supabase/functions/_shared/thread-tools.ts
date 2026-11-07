@@ -25,7 +25,13 @@ export type ThreadStoreLike = Pick<
 
 const SESSION_HELP =
   'A session is your identity as one running agent: one conversation or job, even when several agents share a token. ' +
-  'Pass session (the id returned to you) or a stable session_label of your choosing; a new label starts a new session. ' +
+  'This call returns a session id. Keep it and pass it back as session on every later thread call and to whats_new. ' +
+  'If you lose it, pass the same session_label to pick it up again; with neither, a new session is created. ' +
+  "Other sessions' posts show as new to you, never your own.";
+
+const EXISTING_SESSION_HELP =
+  'This only accepts an existing session, by its session id or its session_label, and never creates one; ' +
+  'a session is started by create_thread, post, resolve_thread, reopen_thread or subscribe. ' +
   "Other sessions' posts show as new to you, never your own.";
 
 const sessionShape = {
@@ -103,7 +109,7 @@ export function registerThreadTools(server: McpServer, threads: ThreadStoreLike)
 
   server.registerTool('read_thread', {
     description:
-      `Read a thread with its linked memories and posts. Given a session, it returns the posts you have not yet seen (marked new) and marks them seen; before or after (post seq numbers) pages instead and marks nothing. ${SESSION_HELP}`,
+      `Read a thread with its linked memories and posts. Given a session, it returns the posts you have not yet seen (marked new) and marks them seen; before or after (post seq numbers) pages instead and marks nothing. ${EXISTING_SESSION_HELP}`,
     inputSchema: z.object({
       thread_id: z.string().describe('Thread id'),
       limit: z.number().int().optional().describe('Max posts to return (default 20, 1-100)'),
@@ -205,7 +211,7 @@ export function registerThreadTools(server: McpServer, threads: ThreadStoreLike)
     }));
 
   server.registerTool('unsubscribe', {
-    description: 'Unsubscribe your session from a thread. Pass session or session_label.',
+    description: `Unsubscribe your session from a thread. ${EXISTING_SESSION_HELP}`,
     inputSchema: z.object({ thread_id: z.string().describe('Thread id'), ...sessionShape }),
   }, (a) =>
     guard(async () => {
@@ -217,7 +223,7 @@ export function registerThreadTools(server: McpServer, threads: ThreadStoreLike)
 
   server.registerTool('whats_new', {
     description:
-      `List subscribed threads with posts you have not seen yet, newest first. Call it at the start of a session and between steps of long work. Pass session or session_label. ${SESSION_HELP}`,
+      `List subscribed threads with posts you have not seen yet, newest first. Call it when you resume work and between steps of long work, with your session id or label. ${EXISTING_SESSION_HELP}`,
     inputSchema: z.object({ ...sessionShape }),
   }, (a) =>
     guard(async () => {

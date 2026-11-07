@@ -159,9 +159,18 @@ Deno.test('StoreError text is returned verbatim with isError', async () => {
   assertEquals(r.content[0].text, 'Thread is already resolved');
 });
 
-Deno.test('descriptions explain sessions and when to call whats_new', () => {
+Deno.test('descriptions: creating tools say pass it back; lookup tools never claim a label creates a session', () => {
   const { reg } = setup();
-  assertStringIncludes(reg.post.description ?? '', 'A session is');
-  assertStringIncludes(reg.whats_new.description ?? '', 'start of a session');
+  for (const n of ['create_thread', 'post', 'resolve_thread', 'reopen_thread', 'subscribe']) {
+    assertStringIncludes(reg[n].description ?? '', 'pass it back');
+    assertStringIncludes(reg[n].description ?? '', 'A session is');
+  }
+  for (const n of ['read_thread', 'whats_new', 'unsubscribe']) {
+    const d = reg[n].description ?? '';
+    assertStringIncludes(d, 'never creates one');
+    assert(!d.includes('new session'), `${n} must not say a new session is created`);
+    assert(!d.includes('new label'), n);
+  }
   assertStringIncludes(reg.whats_new.description ?? '', 'between steps');
+  assert(!(reg.whats_new.description ?? '').includes('start of a session'));
 });
