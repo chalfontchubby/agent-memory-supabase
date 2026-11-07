@@ -59,6 +59,11 @@ const vec = (e: number[]): string => JSON.stringify(e);
 const notFoundMemory = (id: string) => new StoreError(`Memory ${id} not found`);
 const noWrite = (scope: string) => new StoreError(`No write access to scope '${scope}'`);
 
+/** A malformed session id fails before any embedding or query. */
+function checkSessionId(s?: SessionRef): void {
+  if (s?.session !== undefined && !isUuid(s.session)) throw new StoreError('Session not found');
+}
+
 export class PgMemoryStore implements MemoryStore {
   constructor(
     private readonly sql: Sql,
@@ -144,6 +149,7 @@ export class PgMemoryStore implements MemoryStore {
   }
 
   async storeBatch(scope: string, rs: StoreRequest[], s?: SessionRef): Promise<Memory[]> {
+    checkSessionId(s);
     if (rs.length > STORE_BATCH_MAX) {
       throw new Error(
         `store_batch accepts at most ${STORE_BATCH_MAX} memories per call on this server; ` +
@@ -192,6 +198,7 @@ export class PgMemoryStore implements MemoryStore {
   }
 
   async update(id: string, u: UpdateRequest, s?: SessionRef): Promise<Memory> {
+    checkSessionId(s);
     if (u.content !== undefined) checkContent(u.content);
     // Read current state first so we know whether to embed (outside the write transaction).
     const current = await this.run((tx) => this.visibleWritable(tx, id));

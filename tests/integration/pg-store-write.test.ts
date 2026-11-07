@@ -294,3 +294,16 @@ Deno.test('update without session clears updated_session attribution', () =>
     assertEquals(h[0].session_id, null);
     assertEquals(h[1].session_id, sid);
   }));
+
+Deno.test('non-UUID session fails before embedding or any query', () =>
+  withWorld(async (w, _admin, mk) => {
+    const [s, e] = mk(w.rw.id);
+    await assertRejects(() => s.store(w.alpha.name, req('x'), { session: 'nope' }), Error, 'Session not found');
+    await assertRejects(() => s.storeBatch(w.alpha.name, [req('x')], { session: 'nope' }), Error, 'Session not found');
+    await assertRejects(
+      () => s.update('00000000-0000-0000-0000-000000000000', { content: 'y' }, { session: 'nope' }),
+      Error,
+      'Session not found',
+    );
+    assertEquals(e.calls, 0);
+  }));
