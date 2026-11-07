@@ -7,6 +7,10 @@ Memories live in **scopes** (named memory pools, such as `predbat-devs`). An adm
 read-write access per scope, and Postgres row-level security enforces it. Several developers and their bots can
 share one memory, and no one can read a scope they weren't granted.
 
+If you want to buy me a beer, then please use [Paypal](https://paypal.me/predbat?country.x=GB&locale.x=en_GB) or
+[GitHub sponsor](https://github.com/springfall2008)
+![image](https://github.com/springfall2008/batpred/assets/48591903/b3a533ef-0862-4e0b-b272-30e254f58467)
+
 ## Tools
 
 The server exposes 22 tools, plus 13 `admin_` tools that only admins see (see [Admins](#admins)). Eleven are the
