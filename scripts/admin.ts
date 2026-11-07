@@ -3,13 +3,18 @@ import { connect } from '../supabase/functions/_shared/db.ts';
 import {
   createMember,
   createScope,
+  type DeletedFilter,
+  type DeletedRow,
+  eraseMemory,
   grant,
   issueToken,
+  listDeleted,
   listGrants,
   listScopes,
   listTokens,
+  memorySummary,
   parseExpires,
-  restoreMemory,
+  restoreMemories,
   revoke,
   revokeToken,
 } from './lib/admin-db.ts';
@@ -24,7 +29,11 @@ const USAGE = `Usage: deno run -A scripts/admin.ts <command> ...
   issue-token <member> <name> [--expires <ISO date | Nd>]
   list-tokens <member>
   revoke-token <id>
-  restore <memory-id>
+  list-deleted [--scope <s>] [--by <member|admin>] [--since <ISO date>]
+  restore <memory-id>...
+  restore [--scope <s>] [--by <member|admin>] [--since <ISO date>] --yes
+  erase <memory-id> --yes            (hard delete now, with its history content; not reversible)
+Without --yes, filtered restore and erase only show what they would do, and exit 1.
 Requires AGENT_MEMORY_DB_URL (direct or session-pooler connection string).`;
 
 function table<T extends object>(rows: T[], cols: (keyof T & string)[]): string {
@@ -36,16 +45,21 @@ function table<T extends object>(rows: T[], cols: (keyof T & string)[]): string 
     .join('\n');
 }
 
-async function main(): Promise<void> {
+const DELETED_COLS: (keyof DeletedRow & string)[] = ['id', 'scope', 'deletedAt', 'deletedBy', 'firstLine'];
+
+/** Returns the process exit code. */
+async function main(): Promise<number> {
   const args = parseArgs(Deno.args, {
-    string: ['description', 'human', 'expires'],
-    boolean: ['bot'],
+    string: ['description', 'human', 'expires', 'scope', 'by', 'since'],
+    boolean: ['bot', 'yes'],
   });
   const [cmd, ...p] = args._.map(String);
   if (!cmd) {
     console.log(USAGE);
-    return;
+    return 0;
   }
+  const filter: DeletedFilter = { scope: args.scope, by: args.by, since: args.since };
+  const hasFilter = args.scope !== undefined || args.by !== undefined || args.since !== undefined;
   const need = (n: number, usage: string) => {
     if (p.length !== n) throw new Error(`Usage: ${usage}`);
   };
@@ -113,22 +127,61 @@ async function main(): Promise<void> {
         await revokeToken(sql, p[0]);
         console.log(`Revoked token ${p[0]}`);
         break;
-      case 'restore':
-        need(1, 'restore <memory-id>');
-        await restoreMemory(sql, p[0]);
-        console.log(`Restored memory ${p[0]}`);
+      case 'list-deleted':
+        need(0, 'list-deleted [--scope <s>] [--by <member|admin>] [--since <ISO date>]');
+        console.log(table(await listDeleted(sql, filter), DELETED_COLS));
         break;
+      case 'restore': {
+        const usage = 'restore <memory-id>... | restore [--scope <s>] [--by <member|admin>] [--since <ISO date>] --yes';
+        if (p.length > 0 && hasFilter) throw new Error(`Give memory ids or filters, not both. Usage: ${usage}`);
+        let ids = p;
+        if (p.length === 0) {
+          if (!hasFilter) throw new Error(`Usage: ${usage}`);
+          const rows = await listDeleted(sql, filter);
+          if (!args.yes) {
+            console.log(table(rows, DELETED_COLS));
+            console.log(`Would restore ${rows.length} memories. Re-run with --yes to restore them.`);
+            return 1;
+          }
+          ids = rows.map((r) => r.id);
+        }
+        const { restored, missing } = await restoreMemories(sql, ids);
+        console.log(`Restored ${restored.length} ${restored.length === 1 ? 'memory' : 'memories'}`);
+        if (missing.length > 0) {
+          console.error(`Not found or not deleted: ${missing.join(', ')}`);
+          return 1;
+        }
+        break;
+      }
+      case 'erase': {
+        need(1, 'erase <memory-id> --yes');
+        const m = await memorySummary(sql, p[0]);
+        if (!m) throw new Error(`Memory ${p[0]} not found`);
+        if (!args.yes) {
+          console.log(`Would erase memory ${m.id}${m.deletedAt ? ' (soft-deleted)' : ''}`);
+          console.log(`  scope: ${m.scope}`);
+          console.log(`  first line: ${m.firstLine}`);
+          console.log('This cannot be undone. Re-run with --yes to erase it.');
+          return 1;
+        }
+        await eraseMemory(sql, m.id);
+        console.log(`Erased memory ${m.id}`);
+        break;
+      }
       default:
         throw new Error(`Unknown command '${cmd}'\n${USAGE}`);
     }
   } finally {
     await sql.end();
   }
+  return 0;
 }
 
+let code: number;
 try {
-  await main();
+  code = await main();
 } catch (e) {
   console.error(`Error: ${(e as Error).message}`);
-  Deno.exit(1);
+  code = 1;
 }
+if (code !== 0) Deno.exit(code);

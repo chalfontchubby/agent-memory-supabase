@@ -153,3 +153,103 @@ export async function restoreMemory(sql: Sql, id: string): Promise<void> {
   const [r] = await sql`select agent_memory.restore(${id}::uuid) as ok`;
   if (!r.ok) throw new Error(`Memory ${id} not found or not deleted`);
 }
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** First line of the content, trimmed, at most `max` characters. */
+export function firstLine(content: string, max = 80): string {
+  const line = content.split('\n')[0].trim();
+  return line.length > max ? line.slice(0, max) : line;
+}
+
+export interface MemorySummary {
+  id: string;
+  scope: string;
+  deletedAt: Date | null;
+  firstLine: string;
+}
+
+/** A memory, live or soft-deleted, or null when there is none with that id. */
+export async function memorySummary(sql: Sql, id: string): Promise<MemorySummary | null> {
+  if (!UUID.test(id)) return null;
+  const [r] = await sql`
+    select m.id, s.name as scope, m.deleted_at as "deletedAt", m.content
+    from agent_memory.memories m join agent_memory.scopes s on s.id = m.scope_id
+    where m.id = ${id}::uuid`;
+  return r ? { id: r.id, scope: r.scope, deletedAt: r.deletedAt, firstLine: firstLine(r.content) } : null;
+}
+
+/** Hard-delete a memory now (live or soft-deleted) and scrub its history. Not reversible. */
+export async function eraseMemory(sql: Sql, id: string): Promise<void> {
+  const ok = UUID.test(id) && (await sql`select agent_memory.erase(${id}::uuid) as ok`)[0].ok;
+  if (!ok) throw new Error(`Memory ${id} not found`);
+}
+
+export interface DeletedFilter {
+  scope?: string;
+  /** Member display name, or 'admin' for deletions made without a member. */
+  by?: string;
+  /** ISO date: deleted at or after. */
+  since?: string;
+}
+
+export interface DeletedRow {
+  id: string;
+  scope: string;
+  deletedAt: Date;
+  deletedBy: string;
+  firstLine: string;
+}
+
+/** Soft-deleted memories, newest deletion first, with who deleted each (from its latest 'delete' history row). */
+export async function listDeleted(sql: Sql, f: DeletedFilter = {}): Promise<DeletedRow[]> {
+  if (f.scope !== undefined) await scopeId(sql, f.scope);
+  if (f.since !== undefined && (!/^\d{4}-\d{2}-\d{2}/.test(f.since) || isNaN(Date.parse(f.since)))) {
+    throw new Error(`Invalid --since '${f.since}': use an ISO date or timestamp (2026-11-07 or 2026-11-07T12:00:00Z)`);
+  }
+  // 'admin' means "no member": unless a member is actually called admin.
+  let byMember: string | null | undefined;
+  if (f.by !== undefined) {
+    const [r] = await sql`select id from agent_memory.members where display_name = ${f.by}`;
+    if (r) byMember = r.id;
+    else if (f.by === 'admin') byMember = null;
+    else throw new Error(`Member '${f.by}' not found`);
+  }
+  const rows = await sql`
+    select m.id, s.name as scope, m.deleted_at as "deletedAt", m.content,
+      case when h.member_id is null then 'admin' else coalesce(mb.display_name, h.member_id::text) end as "deletedBy"
+    from agent_memory.memories m
+    join agent_memory.scopes s on s.id = m.scope_id
+    left join lateral (
+      select hh.member_id from agent_memory.memory_history hh
+      where hh.memory_id = m.id and hh.action = 'delete' order by hh.id desc limit 1
+    ) h on true
+    left join agent_memory.members mb on mb.id = h.member_id
+    where m.deleted_at is not null
+      and ${f.scope === undefined ? sql`true` : sql`s.name = ${f.scope}`}
+      and ${f.since === undefined ? sql`true` : sql`m.deleted_at >= ${f.since}::timestamptz`}
+      and ${
+    byMember === undefined ? sql`true` : byMember === null ? sql`h.member_id is null` : sql`h.member_id = ${byMember}`
+  }
+    order by m.deleted_at desc, m.id`;
+  return rows.map((r) => ({
+    id: r.id,
+    scope: r.scope,
+    deletedAt: r.deletedAt,
+    deletedBy: r.deletedBy,
+    firstLine: firstLine(r.content),
+  }));
+}
+
+/** Restore several soft-deleted memories in one transaction. Ids that are unknown or not deleted are returned in `missing`. */
+export async function restoreMemories(sql: Sql, ids: string[]): Promise<{ restored: string[]; missing: string[] }> {
+  const restored: string[] = [];
+  const missing: string[] = [];
+  await sql.begin(async (tx) => {
+    for (const id of [...new Set(ids)]) {
+      const ok = UUID.test(id) && (await tx`select agent_memory.restore(${id}::uuid) as ok`)[0].ok;
+      (ok ? restored : missing).push(id);
+    }
+  });
+  return { restored, missing };
+}
