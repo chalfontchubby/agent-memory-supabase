@@ -33,7 +33,7 @@ async function snapshotRows() {
   const grants = await sql`select scope_id, member_id, access, granted_at::text, granted_by
     from agent_memory.scope_grants order by member_id`;
   const members = await sql`select id, display_name, kind, email from agent_memory.members order by id`;
-  const scopes = await sql`select id, description, created_at::text, name from agent_memory.scopes order by id`;
+  const scopes = await sql`select id, description, created_at::text, name from agent_memory.scopes order by name`;
   return { mem, grants, members, scopes };
 }
 
