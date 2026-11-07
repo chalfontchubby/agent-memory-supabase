@@ -2,6 +2,7 @@
   "version": "5",
   "specifiers": {
     "jsr:@std/assert@1": "1.0.19",
+    "jsr:@std/cli@1.0.9": "1.0.9",
     "jsr:@std/internal@^1.0.12": "1.0.14",
     "npm:@modelcontextprotocol/server@2.4.0": "2.4.0",
     "npm:postgres@3.4.5": "3.4.5",
@@ -13,6 +14,9 @@
       "dependencies": [
         "jsr:@std/internal"
       ]
+    },
+    "@std/cli@1.0.9": {
+      "integrity": "557e5865af000efbf3f737dcfea5b8ab86453594f4a9cd8d08c9fa83d8e3f3bc"
     },
     "@std/internal@1.0.14": {
       "integrity": "291516b3d4c35024d6ffbc0a9df5bf4c64116e05b50012cf846710152d2ffdf7"
