@@ -1,7 +1,7 @@
 import type postgres from 'npm:postgres@3.4.5';
 import { type Sql, withMember } from './db.ts';
-import { importanceMultiplier, isEvergreen, parseDecayHalfLife } from './decay.ts';
-import { STORE_BATCH_MAX } from './limits.ts';
+import { applyDecay, importanceMultiplier, isEvergreen, parseDecayHalfLife } from './decay.ts';
+import { DEFAULT_LIMIT, OVER_FETCH_FACTOR, STORE_BATCH_MAX } from './limits.ts';
 import type {
   Embedder,
   Memory,
@@ -42,6 +42,10 @@ export function rowToMemory(r: Row): Memory {
   };
 }
 
+const SEARCH_MODES: readonly string[] = ['hybrid', 'keyword', 'semantic'];
+function checkLimit(n: number): void {
+  if (!Number.isInteger(n) || n < 1) throw new Error('Invalid limit');
+}
 const vec = (e: number[]): string => JSON.stringify(e);
 const notFoundMemory = (id: string) => new StoreError(`Memory ${id} not found`);
 const noWrite = (scope: string) => new StoreError(`No write access to scope '${scope}'`);
@@ -221,18 +225,159 @@ export class PgMemoryStore implements MemoryStore {
     });
   }
 
-  // ── Read half: Task 7 ──────────────────────────────────────────
+  // ── Read half ──────────────────────────────────────────────────
 
-  search(_q: string, _m: SearchMode, _f: SearchFilters, _e?: number[] | null): Promise<SearchResult[]> {
-    throw new Error('not implemented');
+  /** Resolve scope names to ids the member can read. Omitted or empty → every readable scope. */
+  private async resolveScopeIds(tx: Tx, names?: string[]): Promise<string[]> {
+    if (!names || names.length === 0) {
+      const rows = await tx<Row[]>`
+        select scope_id as id from agent_memory.scope_grants where member_id = ${this.memberId}::uuid`;
+      return rows.map((r) => r.id);
+    }
+    const unique = [...new Set(names)];
+    const rows = await tx<Row[]>`
+      select s.id, s.name from agent_memory.scopes s
+      join agent_memory.scope_grants g on g.scope_id = s.id and g.member_id = ${this.memberId}::uuid
+      where s.name = any(${unique}::text[])`;
+    const found = new Set(rows.map((r) => r.name));
+    for (const n of unique) if (!found.has(n)) throw new StoreError(`Scope '${n}' not found`);
+    return rows.map((r) => r.id);
   }
-  findRelated(_id: string, _limit: number, _scopes?: string[]): Promise<SearchResult[]> {
-    throw new Error('not implemented');
+
+  private toDecayInputs(rows: Row[]) {
+    return rows.map((r) => ({
+      memory: rowToMemory(r),
+      rawScore: Number(r.raw_score),
+      accessCount: Number(r.access_count),
+      lastAccessedAt: r.last_accessed_at ? iso(r.last_accessed_at) : null,
+    }));
   }
-  listRecent(_limit: number, _c?: MemoryCategory, _scopes?: string[]): Promise<Memory[]> {
-    throw new Error('not implemented');
+
+  private async touch(tx: Tx, results: SearchResult[]): Promise<void> {
+    if (results.length === 0) return;
+    const ids = results.map((r) => r.memory.id);
+    await tx`select agent_memory.touch_accessed(${ids}::uuid[])`;
   }
-  stats(_scopes?: string[]): Promise<MemoryStats> {
-    throw new Error('not implemented');
+
+  async search(
+    query: string,
+    mode: SearchMode,
+    f: SearchFilters,
+    embedding?: number[] | null,
+  ): Promise<SearchResult[]> {
+    if (!SEARCH_MODES.includes(mode)) throw new Error('Invalid search mode');
+    const limit = f.limit ?? DEFAULT_LIMIT;
+    checkLimit(limit);
+    // null forces keyword-only; otherwise embed (outside the transaction) unless the mode is keyword.
+    let effectiveMode: SearchMode = mode;
+    let emb: number[] | null = null;
+    if (embedding === null) effectiveMode = 'keyword';
+    else if (mode !== 'keyword') emb = embedding ?? await this.embedder.embed(query);
+    const embArg = emb ? vec(emb) : null;
+    return await this.run(async (tx) => {
+      const scopeIds = await this.resolveScopeIds(tx, f.scopes);
+      if (scopeIds.length === 0) return [];
+      const rows = await tx<Row[]>`
+        select * from agent_memory.search_memories(
+          ${query}::text, ${embArg}::extensions.vector, ${effectiveMode}::text, ${scopeIds}::uuid[],
+          ${f.category ?? null}::text, ${f.tags ? tx.array(f.tags) : null}::text[],
+          ${f.after ?? null}::timestamptz, ${f.before ?? null}::timestamptz,
+          ${limit * OVER_FETCH_FACTOR}::int)`;
+      const results = applyDecay(this.toDecayInputs(rows), limit, this.halfLifeDays);
+      await this.touch(tx, results);
+      return results;
+    }, (code) => code === '22007' || code === '22008' ? new StoreError('Invalid date filter') : undefined);
+  }
+
+  async findRelated(id: string, limit: number, scopes?: string[]): Promise<SearchResult[]> {
+    checkLimit(limit);
+    return await this.run(async (tx) => {
+      const scopeIds = await this.resolveScopeIds(tx, scopes);
+      let visible: Row[];
+      try {
+        visible = await tx.savepoint((s) => s<Row[]>`select id from agent_memory.memory_view where id = ${id}::uuid`);
+      } catch (e) {
+        if ((e as { code?: string }).code === '22P02') throw notFoundMemory(id);
+        throw e;
+      }
+      if (visible.length === 0) throw notFoundMemory(id);
+      const rows = await tx<Row[]>`
+        select * from agent_memory.related_memories(${id}::uuid, ${scopeIds}::uuid[], ${
+        limit * OVER_FETCH_FACTOR
+      }::int)`;
+      const results = applyDecay(this.toDecayInputs(rows), limit, this.halfLifeDays);
+      await this.touch(tx, results);
+      return results;
+    });
+  }
+
+  async listRecent(limit: number, category?: MemoryCategory, scopes?: string[]): Promise<Memory[]> {
+    checkLimit(limit);
+    return await this.run(async (tx) => {
+      const scopeIds = await this.resolveScopeIds(tx, scopes);
+      const rows = await tx<Row[]>`
+        select * from agent_memory.memory_view
+        where scope_id = any(${scopeIds}::uuid[]) and (${category ?? null}::text is null or category = ${
+        category ?? null
+      }::text)
+        order by created_at desc, id
+        limit ${limit}`;
+      return rows.map(rowToMemory);
+    });
+  }
+
+  async stats(scopes?: string[]): Promise<MemoryStats> {
+    return await this.run(async (tx) => {
+      const scopeIds = await this.resolveScopeIds(tx, scopes);
+      const rows = await tx<Row[]>`
+        select * from agent_memory.memory_view where scope_id = any(${scopeIds}::uuid[])`;
+      const byCategory: Record<string, number> = {};
+      const byScope: Record<string, number> = {};
+      let neverAccessed = 0;
+      let belowPruneThreshold = 0;
+      let totalAccess = 0;
+      let oldest: number | null = null;
+      let newest: number | null = null;
+      for (const r of rows) {
+        byCategory[r.category] = (byCategory[r.category] ?? 0) + 1;
+        byScope[r.scope] = (byScope[r.scope] ?? 0) + 1;
+        const ac = Number(r.access_count);
+        totalAccess += ac;
+        if (ac === 0) neverAccessed++;
+        const created = new Date(r.created_at).getTime();
+        if (oldest === null || created < oldest) oldest = created;
+        if (newest === null || created > newest) newest = created;
+        if (!isEvergreen(r.tags)) {
+          const updatedAt = iso(r.updated_at);
+          const ageDays = Math.max(0, (Date.now() - new Date(updatedAt).getTime()) / MS_PER_DAY);
+          const eff = this.halfLifeDays * importanceMultiplier({
+            accessCount: ac,
+            lastAccessedAt: r.last_accessed_at ? iso(r.last_accessed_at) : null,
+            updatedAt,
+          });
+          const weak = eff > 0 && Math.pow(0.5, ageDays / eff) < 0.05;
+          if (weak || (ac === 0 && ageDays > 90)) belowPruneThreshold++;
+        }
+      }
+      const mostAccessed = rows
+        .map((r) => ({
+          id: r.id as string,
+          content: (r.content as string).slice(0, 100),
+          count: Number(r.access_count),
+        }))
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 5);
+      return {
+        totalMemories: rows.length,
+        byCategory,
+        byScope,
+        oldestMemory: oldest === null ? null : new Date(oldest).toISOString(),
+        newestMemory: newest === null ? null : new Date(newest).toISOString(),
+        neverAccessed,
+        belowPruneThreshold,
+        avgAccessCount: rows.length > 0 ? Math.round((totalAccess / rows.length) * 10) / 10 : 0,
+        mostAccessed,
+      };
+    });
   }
 }
