@@ -264,6 +264,9 @@ Keep the token in an environment variable, not in a committed file.
 
 ### Suggested CLAUDE.md wording
 
+For a fuller section, covering scopes, keeping work status true, and when and how to use threads and sessions, see
+[docs/claude-md-sample.md](docs/claude-md-sample.md). The short version:
+
 ```markdown
 ## Shared memory
 - Call `list_scopes` first to see which scopes you can use and whether each is read or write.
