@@ -66,7 +66,9 @@ await step('tools/list', async () => {
 });
 await step('list_scopes', async () => {
   const r = await call('list_scopes', {});
-  ok(r.scopes.some((s: Json) => s.name === scope), `scope '${scope}' not listed`);
+  const s = r.scopes.find((x: Json) => x.scope === scope);
+  ok(s, `scope '${scope}' not listed`);
+  ok(s.access === 'write', `expected write access, got ${s.access}`);
 });
 await step('store', async () => {
   const r = await call('store', {
