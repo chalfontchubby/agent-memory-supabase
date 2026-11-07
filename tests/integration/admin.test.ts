@@ -121,7 +121,11 @@ Deno.test('create-member --human links auth.users by email, case-insensitively',
       assertEquals(linked.authUserId, uid);
       const unlinked = await createMember(sql, `h2-${s}`, { kind: 'human', email: `none-${s}@example.test` });
       assertEquals(unlinked.authUserId, null);
-      await assertRejects(() => createMember(sql, `h3-${s}`, { kind: 'human' }), Error, 'requires an email');
+      const noEmail = await createMember(sql, `h3-${s}`, { kind: 'human' });
+      assertEquals(noEmail.kind, 'human');
+      assertEquals(noEmail.authUserId, null);
+      const [row] = await sql`select email from agent_memory.members where id = ${noEmail.id}`;
+      assertEquals(row.email, null);
     } finally {
       await sql`delete from auth.users where id = ${uid}`;
     }

@@ -70,18 +70,19 @@ export async function createMember(
   name: string,
   opts: { kind: 'human' | 'bot'; email?: string },
 ): Promise<Member> {
-  if (opts.kind === 'human' && !opts.email) throw new Error('A human member requires an email (--human <email>)');
+  // Email is optional: it is only used to link the member to a Supabase login (auth.users).
+  const email = opts.email?.trim() || null;
   const [dup] = await sql`select 1 from agent_memory.members where display_name = ${name}`;
   if (dup) throw new Error(`Member '${name}' already exists`);
   let authUserId: string | null = null;
-  if (opts.email) {
+  if (email) {
     // Read-only lookup; nothing is ever written to auth.
-    const [u] = await sql`select id from auth.users where lower(email) = lower(${opts.email})`;
+    const [u] = await sql`select id from auth.users where lower(email) = lower(${email})`;
     authUserId = u?.id ?? null;
   }
   const [r] = await sql`
     insert into agent_memory.members (display_name, kind, email, auth_user_id)
-    values (${name}, ${opts.kind}, ${opts.email ?? null}, ${authUserId})
+    values (${name}, ${opts.kind}, ${email}, ${authUserId})
     returning id, display_name as name, kind, auth_user_id as "authUserId"`;
   return r as Member;
 }

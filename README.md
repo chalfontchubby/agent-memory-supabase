@@ -30,7 +30,7 @@ deno run -A scripts/setup.ts --configure-claude
 `.env` is reused.
 
 Flags: `--env-file <path>` (default `.env`), `--scope <name>` (default `default`), `--member <name>`,
-`--email <address>` (a human member needs one; defaults to `git config user.email`), `--bot` (a bot member instead of a
+`--email <address>` (optional; only links the member to a Supabase login), `--bot` (a bot member instead of a
 human), `--new-token` (issue another token even if `.env` has a live one), `--skip-deploy`, `--configure-claude` and
 `--name <server-name>` (default `shared-memory`).
 
@@ -89,7 +89,8 @@ password (for example `@` as `%40`, `/` as `%2F`, `#` as `%23`), or the URL will
 export AGENT_MEMORY_DB_URL='postgresql://postgres.<project-ref>:<password>@<pooler-host>:5432/postgres'
 
 deno run -A scripts/admin.ts create-scope my-team --description "Team memory"
-deno run -A scripts/admin.ts create-member alice --human alice@example.com
+deno run -A scripts/admin.ts create-member alice                 # email optional: --email alice@example.com
+                                                                 # links a Supabase login if one exists
 deno run -A scripts/admin.ts create-member ci-bot --bot
 deno run -A scripts/admin.ts grant alice my-team write
 deno run -A scripts/admin.ts grant ci-bot my-team read
