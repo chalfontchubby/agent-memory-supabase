@@ -181,18 +181,23 @@ export class PgThreadStore {
           select last_seen_seq from agent_memory.thread_subscriptions
           where session_id = ${session.id}::uuid and thread_id = ${threadId}::uuid`;
         if (sub[0]) {
-          const rows = await tx<Row[]>`
-            select * from agent_memory.thread_post_view
-            where thread_id = ${threadId}::uuid and seq > ${sub[0].last_seen_seq}::int
-            order by seq limit ${limit + 1}`;
-          if (rows.length > 0) {
-            moreUnread = rows.length > limit;
-            const page = rows.slice(0, limit);
+          const unreadFrom = (seq: number) =>
+            tx<Row[]>`
+              select 1 from agent_memory.thread_post_view
+              where thread_id = ${threadId}::uuid and seq > ${seq}::int
+                and session_id is distinct from ${session.id}::uuid limit 1`;
+          // Catch-up applies only when someone else has posted past the marker.
+          if ((await unreadFrom(sub[0].last_seen_seq)).length > 0) {
+            const page = await tx<Row[]>`
+              select * from agent_memory.thread_post_view
+              where thread_id = ${threadId}::uuid and seq > ${sub[0].last_seen_seq}::int
+              order by seq limit ${limit}`;
+            const lastSeq: number = page[page.length - 1].seq;
             posts = page.map((r) => ({ ...toPost(r), new: r.session_id !== session.id }));
+            moreUnread = (await unreadFrom(lastSeq)).length > 0;
             // Only ever the highest seq actually returned: mark_seen does not clamp.
             await tx`
-              select agent_memory.mark_seen(
-                ${session.id}::uuid, ${threadId}::uuid, ${page[page.length - 1].seq}::int)`;
+              select agent_memory.mark_seen(${session.id}::uuid, ${threadId}::uuid, ${lastSeq}::int)`;
           }
         }
       }

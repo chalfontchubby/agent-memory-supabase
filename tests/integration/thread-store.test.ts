@@ -228,3 +228,31 @@ Deno.test('links, unlink and linkedThreads only return readable links', () =>
     await s.link(t.thread.id, mA);
     assertEquals((await s.readThread(t.thread.id, {}, {})).links.length, 1);
   }));
+
+Deno.test('own posts are not unread: solo session gets latest posts', () =>
+  withWorld(async (w, _a, mk) => {
+    const s = mk(w.rw.id);
+    const a = await s.createThread(w.alpha.name, 't', 'first', [], { sessionLabel: 'A' });
+    for (let i = 0; i < 24; i++) await s.post(a.thread.id, `p${i}`, { sessionLabel: 'A' });
+    const r = await s.readThread(a.thread.id, { limit: 20 }, { sessionLabel: 'A' });
+    assertEquals(r.posts.map((p) => p.seq), Array.from({ length: 20 }, (_, i) => i + 6));
+    assertEquals(r.moreUnread, undefined);
+    assert(r.posts.every((p) => p.new === undefined));
+    assertEquals((await s.whatsNew({ sessionLabel: 'A' })).threads.length, 0);
+  }));
+
+Deno.test('catch-up page mixes own and other posts', () =>
+  withWorld(async (w, _a, mk) => {
+    const s = mk(w.rw.id);
+    const a = await s.createThread(w.alpha.name, 't', 'first', [], { sessionLabel: 'A' });
+    const t = a.thread.id;
+    await s.post(t, 'b2', { sessionLabel: 'B' }); // seq 2
+    await s.post(t, 'a3', { sessionLabel: 'A' }); // seq 3
+    await s.post(t, 'a4', { sessionLabel: 'A' }); // seq 4
+    const r = await s.readThread(t, { limit: 2 }, { sessionLabel: 'A' });
+    assertEquals(r.posts.map((p) => [p.seq, p.new]), [[2, true], [3, false]]);
+    assertEquals(r.moreUnread, false);
+    const r2 = await s.readThread(t, { limit: 10 }, { sessionLabel: 'A' });
+    assertEquals(r2.posts.map((p) => p.seq), [1, 2, 3, 4]);
+    assertEquals(r2.moreUnread, undefined);
+  }));
