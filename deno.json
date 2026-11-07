@@ -12,9 +12,24 @@
   "fmt": {
     "lineWidth": 120,
     "singleQuote": true,
-    "exclude": ["docs", "spike", "supabase/.temp", ".superpowers", ".remember", "README.md"]
+    "exclude": [
+      "docs",
+      "spike",
+      "supabase/.temp",
+      ".superpowers",
+      ".remember",
+      "README.md"
+    ]
   },
   "lint": {
-    "exclude": ["docs", "spike"]
+    "exclude": [
+      "docs",
+      "spike"
+    ],
+    "rules": {
+      "exclude": [
+        "no-import-prefix"
+      ]
+    }
   }
 }
