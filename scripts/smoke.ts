@@ -41,6 +41,20 @@ async function call(name: string, a: Record<string, unknown>): Promise<Json> {
   }
 }
 
+const BASE_TOOLS = [
+  'list_scopes',
+  'store',
+  'store_batch',
+  'search',
+  'recall',
+  'find_related',
+  'list_recent',
+  'update',
+  'delete',
+  'stats',
+  'prune',
+];
+
 let failures = 0;
 async function step(name: string, fn: () => Promise<void>) {
   const t0 = performance.now();
@@ -61,8 +75,13 @@ let id = '';
 let sibling = '';
 
 await step('tools/list', async () => {
-  const n = (await client.listTools()).tools.length;
-  ok(n === 11, `expected 11 tools, got ${n}`);
+  const names = (await client.listTools()).tools.map((t) => t.name);
+  const missing = BASE_TOOLS.filter((t) => !names.includes(t));
+  ok(missing.length === 0, `missing base tools: ${missing.join(', ')}`);
+  const extra = names.filter((t) => !BASE_TOOLS.includes(t));
+  const stray = extra.filter((t) => !t.startsWith('admin_'));
+  ok(stray.length === 0, `unexpected non-admin tools: ${stray.join(', ')}`);
+  console.log(extra.length ? `  saw base + ${extra.length} admin tools (admin token)` : '  saw base tools only');
 });
 await step('list_scopes', async () => {
   const r = await call('list_scopes', {});

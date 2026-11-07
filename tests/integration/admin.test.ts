@@ -1,21 +1,27 @@
 import { assert, assertEquals, assertRejects, assertStringIncludes } from '@std/assert';
 import { hashToken } from '../../supabase/functions/_shared/tokens.ts';
 import {
+  adminLog,
   createMember,
   createScope,
+  deactivateMember,
+  deleteScope,
   eraseMemory,
   firstLine,
   grant,
   issueToken,
   listDeleted,
   listGrants,
+  listMembers,
   listScopes,
   listTokens,
   parseExpires,
+  reactivateMember,
   restoreMemories,
   restoreMemory,
   revoke,
   revokeToken,
+  setAdmin,
 } from '../../scripts/lib/admin-db.ts';
 import { adminSql, LOCAL_DB_URL } from '../helpers/fixtures.ts';
 
@@ -88,7 +94,7 @@ Deno.test('unknown names and bad scope names give friendly errors', () =>
     await assertRejects(() => revoke(sql, `bot-${s}`, `nope-${s}`), Error, `Scope 'nope-${s}' not found`);
     await assertRejects(() => issueToken(sql, `ghost-${s}`, 'n'), Error, `Member 'ghost-${s}' not found`);
     await assertRejects(() => listTokens(sql, `ghost-${s}`), Error, `Member 'ghost-${s}' not found`);
-    await assertRejects(() => createScope(sql, 'Bad_Name'), Error, "Invalid scope name 'Bad_Name'");
+    await assertRejects(() => createScope(sql, 'Bad_Name'), Error, 'Scope names are lowercase letters');
     await assertRejects(() => grant(sql, `bot-${s}`, `team-${s}`, 'admin' as 'read'), Error, 'read or write');
   }));
 
@@ -312,3 +318,106 @@ Deno.test('restore takes several ids, or filters with --yes', () =>
     const r = await restoreMemories(sql, ['not-a-uuid']);
     assertEquals(r, { restored: [], missing: ['not-a-uuid'] });
   }));
+
+/** Run with no other active admin, restoring the previous flags afterwards. */
+async function aloneAsAdmin(sql: AdminSql, fn: () => Promise<void>) {
+  const prior = (await sql`select id from agent_memory.members where is_admin`).map((r) => r.id as string);
+  await sql`update agent_memory.members set is_admin = false where is_admin`;
+  try {
+    await fn();
+  } finally {
+    await sql`update agent_memory.members set is_admin = false where is_admin`;
+    await sql`update agent_memory.members set is_admin = true where id = any(${prior}::uuid[])`;
+  }
+}
+
+Deno.test('set-admin round trip, refuses a bot and the last admin', () =>
+  withAdmin(async (sql, s) => {
+    await aloneAsAdmin(sql, async () => {
+      await createMember(sql, `ann-${s}`, { kind: 'human' });
+      await createMember(sql, `bob-${s}`, { kind: 'human' });
+      await createMember(sql, `bot-${s}`, { kind: 'bot' });
+      const flag = async (n: string) =>
+        (await sql`select is_admin from agent_memory.members where display_name = ${n}`)[0].is_admin as boolean;
+      await setAdmin(sql, `ann-${s}`, true);
+      assertEquals(await flag(`ann-${s}`), true);
+      await setAdmin(sql, `ann-${s}`, true); // idempotent
+      await assertRejects(() => setAdmin(sql, `bot-${s}`, true), Error, "A bot can't be an admin");
+      await assertRejects(() => setAdmin(sql, `ann-${s}`, false), Error, "Can't remove the last active admin");
+      await setAdmin(sql, `bob-${s}`, true);
+      await setAdmin(sql, `ann-${s}`, false);
+      assertEquals(await flag(`ann-${s}`), false);
+      const via = await cli('set-admin', `ann-${s}`, 'on');
+      assertEquals(via.code, 0);
+      assertEquals(await flag(`ann-${s}`), true);
+    });
+  }));
+
+Deno.test('deactivate stops the token resolving; reactivate restores it but not admin', () =>
+  withAdmin(async (sql, s) => {
+    await aloneAsAdmin(sql, async () => {
+      await createMember(sql, `ann-${s}`, { kind: 'human' });
+      await createMember(sql, `bob-${s}`, { kind: 'human' });
+      await setAdmin(sql, `ann-${s}`, true);
+      await setAdmin(sql, `bob-${s}`, true);
+      await createScope(sql, `team-${s}`);
+      await grant(sql, `ann-${s}`, `team-${s}`, 'write');
+      const token = await issueToken(sql, `ann-${s}`, 'laptop');
+      assert(await resolve(sql, token));
+      await deactivateMember(sql, `ann-${s}`);
+      assertEquals(await resolve(sql, token), null);
+      await assertRejects(() => grant(sql, `ann-${s}`, `team-${s}`, 'read'), Error, `Member 'ann-${s}' is deactivated`);
+      const row = (await listMembers(sql)).find((m) => m.name === `ann-${s}`)!;
+      assertEquals(row.deactivated, true);
+      assertEquals(row.is_admin, false);
+      assertEquals(row.live_tokens, 0);
+      await reactivateMember(sql, `ann-${s}`);
+      assertEquals((await listMembers(sql)).find((m) => m.name === `ann-${s}`)!.deactivated, false);
+      assertEquals((await listMembers(sql)).find((m) => m.name === `ann-${s}`)!.is_admin, false);
+      assertEquals((await cli('deactivate', `ann-${s}`)).code, 0);
+      assertEquals((await cli('reactivate', `ann-${s}`)).code, 0);
+      await assertRejects(() => deactivateMember(sql, `ghost-${s}`), Error, `Member 'ghost-${s}' not found`);
+    });
+  }));
+
+Deno.test('delete-scope refuses while memories remain, then deletes', () =>
+  withAdmin(async (sql, s) => {
+    const sc = await createScope(sql, `team-${s}`);
+    await addMemory(sql, sc.id, 'live one');
+    await addMemory(sql, sc.id, 'gone one', true);
+    await assertRejects(
+      () => deleteScope(sql, `team-${s}`),
+      Error,
+      `Scope 'team-${s}' still holds 2 memories; move, delete or erase them first`,
+    );
+    const r = await cli('delete-scope', `team-${s}`);
+    assertEquals(r.code, 1);
+    assertStringIncludes(r.err, `Error: Scope 'team-${s}' still holds 2 memories; move, delete or erase them first`);
+    const empty = await createScope(sql, `empty-${s}`);
+    await deleteScope(sql, `empty-${s}`);
+    assertEquals((await listScopes(sql)).some((x) => x.id === empty.id), false);
+  }));
+
+Deno.test('admin-log is newest first, filters by actor, and holds no token', () =>
+  withAdmin(async (sql, s) => {
+    await createMember(sql, `bot-${s}`, { kind: 'bot' });
+    await createScope(sql, `team-${s}`);
+    await grant(sql, `bot-${s}`, `team-${s}`, 'read');
+    await issueToken(sql, `bot-${s}`, 'laptop');
+    const rows = (await adminLog(sql, { limit: 200 })).filter((r) => r.target.endsWith(s));
+    assertEquals(rows.map((r) => r.action), ['issue_token', 'grant', 'create_scope', 'create_member']);
+    assertEquals(rows[0].actor, grantorName());
+    for (let i = 1; i < rows.length; i++) assert(rows[i - 1].at >= rows[i].at);
+    assertEquals((await adminLog(sql, { actor: 'nobody-' + s })).length, 0);
+    assert((await adminLog(sql, { actor: grantorName(), limit: 1 })).length === 1);
+    const out = (await cli('admin-log', '--limit', '200')).out;
+    assertStringIncludes(out, `bot-${s}`);
+    assertEquals(out.includes('amm_'), false);
+    assertEquals(JSON.stringify(rows).includes('amm_'), false);
+    const recent = await cli('admin-log', '--since', '1d', '--limit', '3');
+    assertEquals(recent.code, 0);
+  }));
+
+function grantorName() {
+  return Deno.env.get('USER') || 'admin';
+}

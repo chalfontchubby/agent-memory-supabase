@@ -8,7 +8,7 @@ import { parseArgs } from 'jsr:@std/cli@1.0.9/parse-args';
 import { connect, type Sql } from '../supabase/functions/_shared/db.ts';
 import { hashToken } from '../supabase/functions/_shared/tokens.ts';
 import { configureClaude } from './configure-claude.ts';
-import { createMember, createScope, grant, issueToken, listScopes } from './lib/admin-db.ts';
+import { createMember, createScope, grant, issueToken, listScopes, setAdmin } from './lib/admin-db.ts';
 import { assertGitIgnored, readEnvFile, upsertEnvVars } from './lib/env-file.ts';
 import { defaultRun, redact, type Runner } from './lib/run.ts';
 
@@ -143,6 +143,12 @@ export async function setup(o: SetupOptions): Promise<number> {
     }
     await grant(sql, member, scope, 'write');
     log(`[6/7] Member '${member}' (${existing ? 'existing' : kind}) can write to '${scope}'`);
+    if (kind === 'human') {
+      await setAdmin(sql, member, true); // idempotent
+      log(`[6/7] Member '${member}' is an admin`);
+    } else {
+      log('Note: no admin yet - run admin.ts set-admin <human> on');
+    }
 
     // 6. token: reuse the one in the env file when it is still live for this member.
     const [m] = await sql`select id from agent_memory.members where display_name = ${member}`;

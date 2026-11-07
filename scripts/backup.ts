@@ -17,6 +17,10 @@ export interface Backup {
     email: string | null;
     authUserId: string | null;
     createdAt: string;
+    /** Absent in version-1 files written before admin support; read as false. */
+    isAdmin?: boolean;
+    /** Absent in older files; read as null. */
+    deactivatedAt?: string | null;
   }[];
   grants: { scope: string; member: string; access: string; grantedAt: string; grantedBy: string | null }[];
   memories: {
@@ -86,7 +90,8 @@ async function exportSnapshot(sql: Sql, scope?: string): Promise<Backup> {
   }
   const members = await sql`
     select id, display_name as "displayName", kind, email, auth_user_id as "authUserId",
-           ${sql.unsafe(TS('created_at'))} as "createdAt"
+           ${sql.unsafe(TS('created_at'))} as "createdAt", is_admin as "isAdmin",
+           ${sql.unsafe(TS('deactivated_at'))} as "deactivatedAt"
     from agent_memory.members
     where ${scope === undefined ? sql`true` : sql`display_name = any(${[...wanted]}::text[])`}
     order by display_name`;
@@ -119,8 +124,10 @@ export async function restoreBackup(sql: Sql, data: Backup): Promise<void> {
     for (const m of data.members) {
       memberIds.set(m.displayName, m.id);
       await tx`
-        insert into agent_memory.members (id, display_name, kind, email, auth_user_id, created_at)
-        values (${m.id}, ${m.displayName}, ${m.kind}, ${m.email}, ${m.authUserId}, (${m.createdAt}::text)::timestamptz)`;
+        insert into agent_memory.members
+          (id, display_name, kind, email, auth_user_id, created_at, is_admin, deactivated_at)
+        values (${m.id}, ${m.displayName}, ${m.kind}, ${m.email}, ${m.authUserId}, (${m.createdAt}::text)::timestamptz,
+                ${m.isAdmin ?? false}, (${m.deactivatedAt ?? null}::text)::timestamptz)`;
     }
     const scopeIds = new Map<string, string>();
     for (const s of data.scopes) {
