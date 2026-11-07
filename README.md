@@ -9,7 +9,7 @@ share one memory, and no one can read a scope they weren't granted.
 
 ## Tools
 
-The server exposes eleven tools: `list_scopes`, `store`, `store_batch`, `search`, `recall`, `find_related`,
+The server exposes 11 tools, plus 12 `admin_` tools that only admins see (see [Admins](#admins)): `list_scopes`, `store`, `store_batch`, `search`, `recall`, `find_related`,
 `list_recent`, `update`, `delete`, `stats` and `prune`. They match the original server, plus a `scope` argument on the
 write tools. Search is hybrid (BM25 full-text plus `gte-small` vector similarity, fused with RRF) with temporal decay.
 Delete and prune are soft; rows are purged after 30 days.
@@ -27,7 +27,7 @@ deno run -A scripts/setup.ts --configure-claude
 (your OS user), grants it write access and issues a token. It saves `AGENT_MEMORY_URL`, `AGENT_MEMORY_TOKEN` and
 `AGENT_MEMORY_DB_URL` into `.env` (mode 0600; it refuses to write unless git ignores the file) and prints the token once.
 `--configure-claude` then runs `claude mcp add` for you. Re-running is safe: nothing is duplicated, and a live token in
-`.env` is reused.
+`.env` is reused. The member it creates becomes the first admin (see [Admins](#admins)).
 
 Flags: `--env-file <path>` (default `.env`), `--scope <name>` (default `default`), `--member <name>`,
 `--email <address>` (optional; only links the member to a Supabase login), `--bot` (a bot member instead of a
@@ -64,6 +64,10 @@ you pass `--remote` (the linked project, or `--remote=<project-ref>`). `function
 
 The schema `agent_memory` must **not** be listed under Settings, API, Exposed schemas. Access goes only through the
 Edge Function; `anon` and `authenticated` have no privileges on it.
+
+Installing by hand, nothing makes you an admin. After creating your own member (see the
+[Admin quick-start](#admin-quick-start)), make it the first admin:
+`deno run -A scripts/admin.ts set-admin <you> on`.
 
 ### Temporal decay
 
@@ -114,6 +118,20 @@ Some members are admins. An admin can manage the team from Claude, not only from
 - **From Claude**, admins can do the rest with the `admin_` tools: `admin_list_scopes`, `admin_create_scope`,
   `admin_delete_scope`, `admin_list_members`, `admin_create_member`, `admin_deactivate_member`, `admin_list_grants`,
   `admin_grant`, `admin_revoke`, `admin_issue_token`, `admin_list_tokens` and `admin_revoke_token`.
+- **Connecting an onboarded member.** The admin issues a token with `admin_issue_token` (or `issue-token`) and gives it
+  to the member, who registers it with Claude Code:
+
+  ```sh
+  claude mcp add --transport http shared-memory https://<project-ref>.supabase.co/functions/v1/agent-memory \
+    --header "Authorization: Bearer <token>" -s user
+  ```
+
+  or, with the URL and token in an env file (`AGENT_MEMORY_URL`, `AGENT_MEMORY_TOKEN`),
+  `deno run -A scripts/configure-claude.ts [--name shared-memory] [--scope user]`, as in the Quick start.
+- **Handle issued tokens with care.** A token issued through `admin_issue_token` passes through the admin's Claude
+  transcript, so give it to the member privately (not in a shared channel), and revoke it if it leaks. Do not
+  auto-allow the `mcp__<server>__admin_*` tools in Claude Code permissions: admin tools run in sessions that also read
+  memories written by other members, so keep the per-call confirmation on.
 - **Admin tools never act on another admin.** Changing an admin, or their grants or tokens, is done from the shell.
 
 Every admin action, from the shell or from Claude, is recorded in the admin log. The log never holds a token.
@@ -152,7 +170,8 @@ deno run -A scripts/backup.ts restore-backup backup-<timestamp>.json
 `backup` exports the whole install by default; `--scope` limits it to one scope (and the members it references). The
 file holds memory content: treat it as private. `restore-backup` loads only into an **empty** install (fresh
 migrations, no scopes, members or memories) and keeps ids. Access tokens are never exported, so after a restore,
-issue new tokens with `issue-token`.
+issue new tokens with `issue-token`. Admin flags and deactivation are kept, and backup files written before admin
+support still restore (as non-admin, active members). The admin log is **not** exported, so it starts empty after a restore.
 
 ### Import from a local agent-memory-mcp store
 
@@ -229,7 +248,8 @@ AGENT_MEMORY_TOKEN=amm_… \
 ```
 
 It runs every tool once through the real endpoint, then three concurrent searches, prints `PASS` or `FAIL` per tool and
-exits non-zero on any failure. It deletes what it stored.
+exits non-zero on any failure. It deletes what it stored. An admin token sees the 12 `admin_` tools as well; the smoke
+test only checks that they are present, and does not exercise them.
 
 ## Development
 
