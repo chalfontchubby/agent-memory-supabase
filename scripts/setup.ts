@@ -138,17 +138,8 @@ export async function setup(o: SetupOptions): Promise<number> {
     log(`[5/7] Scope '${scope}' ${step}`);
     const [existing] = await sql`select id from agent_memory.members where display_name = ${member}`;
     if (!existing) {
-      let email = o.email;
-      if (kind === 'human' && !email) {
-        const g = await run('git', ['config', 'user.email']).catch(() => ({ code: 1, stdout: '', stderr: '' }));
-        email = g.code === 0 ? g.stdout.trim() || undefined : undefined;
-      }
-      if (kind === 'human' && !email) {
-        throw new Error(
-          `A human member needs an email: pass --email <address>, or --bot. Nothing was created for '${member}'.`,
-        );
-      }
-      await createMember(sql, member, { kind, email });
+      // Email is optional and only links a Supabase login, so it is stored only when given.
+      await createMember(sql, member, { kind, email: kind === 'human' ? o.email : undefined });
     }
     await grant(sql, member, scope, 'write');
     log(`[6/7] Member '${member}' (${existing ? 'existing' : kind}) can write to '${scope}'`);

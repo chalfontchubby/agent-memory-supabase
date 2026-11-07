@@ -22,7 +22,7 @@ import {
 const USAGE = `Usage: deno run -A scripts/admin.ts <command> ...
   create-scope <name> [--description <text>]
   list-scopes
-  create-member <name> --human <email> | --bot
+  create-member <name> [--email <address>] | --bot   (email optional; links a Supabase login)
   grant <member> <scope> read|write
   revoke <member> <scope>
   list-grants
@@ -50,7 +50,7 @@ const DELETED_COLS: (keyof DeletedRow & string)[] = ['id', 'scope', 'deletedAt',
 /** Returns the process exit code. */
 async function main(): Promise<number> {
   const args = parseArgs(Deno.args, {
-    string: ['description', 'human', 'expires', 'scope', 'by', 'since'],
+    string: ['description', 'human', 'email', 'expires', 'scope', 'by', 'since'],
     boolean: ['bot', 'yes'],
   });
   const [cmd, ...p] = args._.map(String);
@@ -80,16 +80,16 @@ async function main(): Promise<number> {
         console.log(table(await listScopes(sql), ['name', 'description']));
         break;
       case 'create-member': {
-        need(1, 'create-member <name> --human <email> | --bot');
-        if (!!args.human === args.bot) throw new Error('Specify exactly one of --human <email> or --bot');
-        const m = await createMember(
-          sql,
-          p[0],
-          args.bot ? { kind: 'bot' } : { kind: 'human', email: args.human },
-        );
+        need(1, 'create-member <name> [--email <address>] | --bot');
+        // --human <email> is the older spelling of --email and still works.
+        const email = args.email || args.human || undefined;
+        if (args.bot && email) throw new Error('A bot member has no email: give --bot or --email, not both');
+        const m = await createMember(sql, p[0], args.bot ? { kind: 'bot' } : { kind: 'human', email });
         console.log(
           `Created ${m.kind} member '${m.name}'` +
-            (m.kind === 'human' ? (m.authUserId ? ' (linked to auth user)' : ' (no matching auth user)') : ''),
+            (m.kind === 'human'
+              ? (m.authUserId ? ' (linked to auth user)' : email ? ' (no matching auth user)' : ' (no email)')
+              : ''),
         );
         break;
       }
