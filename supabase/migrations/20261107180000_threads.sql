@@ -611,3 +611,109 @@ grant execute on function agent_memory.subscribe(uuid, uuid) to agent_memory_mem
 grant execute on function agent_memory.unsubscribe(uuid, uuid) to agent_memory_member;
 grant execute on function agent_memory.mark_seen(uuid, uuid, int) to agent_memory_member;
 grant execute on function agent_memory.whats_new(uuid) to agent_memory_member;
+
+-- ===== Task 3: admin thread deletion, purge, scope guard, erase and restore =====
+
+-- Postgres-only core: soft-delete a live thread and write the audit row.
+create function agent_memory.adm_delete_thread(p_id uuid, p_actor uuid, p_label text) returns void
+language plpgsql security definer set search_path = ''
+as $$
+declare
+  v_scope text;
+  v_title text;
+begin
+  update agent_memory.threads t set deleted_at = pg_catalog.now()
+  where t.id = p_id and t.deleted_at is null
+  returning t.title, (select s.name from agent_memory.scopes s where s.id = t.scope_id) into v_title, v_scope;
+  if not found then
+    raise exception 'Thread % not found', p_id;
+  end if;
+  insert into agent_memory.admin_log (actor_member_id, actor_label, action, target, details)
+  values (p_actor, p_label, 'delete_thread', p_id::text,
+          pg_catalog.jsonb_build_object('scope', v_scope, 'title', v_title));
+end
+$$;
+
+-- Member-callable wrapper: admins only.
+create function agent_memory.admin_delete_thread(p_id uuid) returns void
+language plpgsql security definer set search_path = ''
+as $$
+declare
+  v_caller uuid := agent_memory.require_admin();
+begin
+  perform agent_memory.adm_delete_thread(p_id, v_caller, agent_memory.admin_label(v_caller));
+end
+$$;
+
+-- Postgres-only: bring a soft-deleted thread back. False when there is none with that id.
+create function agent_memory.restore_thread(p_id uuid) returns boolean
+language sql security definer set search_path = ''
+as $$
+  with r as (
+    update agent_memory.threads set deleted_at = null
+    where id = p_id and deleted_at is not null
+    returning 1
+  )
+  select exists (select 1 from r)
+$$;
+
+-- Postgres-only: hard-delete a thread now, live or soft-deleted. Posts, links and subscriptions cascade.
+create function agent_memory.erase_thread(p_id uuid) returns boolean
+language plpgsql security definer set search_path = ''
+as $$
+begin
+  delete from agent_memory.threads where id = p_id;
+  return found;
+end
+$$;
+
+-- Tombstone expiry also hard-deletes threads soft-deleted over 30 days ago. Return is still the memory count.
+create or replace function agent_memory.purge_tombstones() returns int
+language plpgsql security definer set search_path = ''
+as $$
+declare
+  v_ids uuid[];
+begin
+  with p as (
+    delete from agent_memory.memories
+    where deleted_at < pg_catalog.now() - interval '30 days'
+    returning id
+  )
+  select coalesce(pg_catalog.array_agg(p.id), '{}'::uuid[]) into v_ids from p;
+  perform agent_memory.scrub_history(v_ids);
+  delete from agent_memory.threads where deleted_at < pg_catalog.now() - interval '30 days';
+  return pg_catalog.cardinality(v_ids);
+end
+$$;
+
+-- A scope that still holds threads (live or soft-deleted) cannot be deleted; checked after the memory check.
+create or replace function agent_memory.adm_delete_scope(p_name text, p_actor uuid, p_label text) returns void
+language plpgsql security definer set search_path = ''
+as $$
+declare
+  v_id uuid;
+  v_count bigint;
+begin
+  select id into v_id from agent_memory.scopes where name = p_name;
+  if v_id is null then
+    raise exception 'Scope ''%'' not found', p_name;
+  end if;
+  select pg_catalog.count(*) into v_count from agent_memory.memories where scope_id = v_id;
+  if v_count > 0 then
+    raise exception 'Scope ''%'' still holds % memories; move, delete or erase them first', p_name, v_count;
+  end if;
+  select pg_catalog.count(*) into v_count from agent_memory.threads where scope_id = v_id;
+  if v_count > 0 then
+    raise exception 'Scope ''%'' still holds % threads; delete or erase them first', p_name, v_count;
+  end if;
+  delete from agent_memory.scopes where id = v_id; -- grants cascade
+  insert into agent_memory.admin_log (actor_member_id, actor_label, action, target, details)
+  values (p_actor, p_label, 'delete_scope', p_name, pg_catalog.jsonb_build_object('scope', p_name));
+end
+$$;
+
+revoke execute on function agent_memory.adm_delete_thread(uuid, uuid, text) from public;
+revoke execute on function agent_memory.admin_delete_thread(uuid) from public;
+revoke execute on function agent_memory.restore_thread(uuid) from public;
+revoke execute on function agent_memory.erase_thread(uuid) from public;
+grant execute on function agent_memory.admin_delete_thread(uuid) to agent_memory_member;
