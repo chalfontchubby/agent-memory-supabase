@@ -14,6 +14,8 @@ async function guard(fn: () => Promise<unknown>) {
   }
 }
 
+const MEMBER_NAME_MSG = "Member names can't be blank or start or end with a space";
+
 /** Registers the 12 admin tools. Register them for admins only. */
 export function registerAdminTools(server: McpServer, admin: PgAdminStore): void {
   server.registerTool('admin_list_scopes', {
@@ -53,7 +55,7 @@ export function registerAdminTools(server: McpServer, admin: PgAdminStore): void
     description:
       'Admin: Create a member (human or bot). Members start with no grants and no tokens; use admin_grant and admin_issue_token next. Admins can only be made from the shell.',
     inputSchema: z.object({
-      name: z.string().describe('Member name'),
+      name: z.string().min(1, MEMBER_NAME_MSG).regex(/^\S(.*\S)?$/, MEMBER_NAME_MSG).describe('Member name'),
       kind: z.enum(['human', 'bot']).default('human').describe('human (default) or bot'),
       email: z.string().optional().describe('Email, to link a Supabase login (optional)'),
     }),

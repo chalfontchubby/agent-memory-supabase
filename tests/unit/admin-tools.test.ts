@@ -23,6 +23,7 @@ const NAMES = [
 type Calls = Record<string, any[][]>;
 type Reg = Record<string, {
   description?: string;
+  inputSchema?: unknown;
   // deno-lint-ignore no-explicit-any
   handler: (args: any, ctx?: unknown) => Promise<{ content: { text: string }[]; isError?: boolean }>;
 }>;
@@ -117,5 +118,21 @@ Deno.test('a store error becomes isError with the message verbatim, and never ec
     const r = await reg[n].handler(args, {});
     assertEquals(r.isError, true, n);
     assertEquals(r.content[0].text, "Member 'x' is an admin; manage admins from the shell", n);
+  }
+});
+
+Deno.test('admin_create_member rejects blank or padded names and accepts a clean one', () => {
+  const { reg } = setup();
+  const schema = reg.admin_create_member.inputSchema as unknown as {
+    safeParse: (v: unknown) => { success: boolean; error?: { issues: { message: string }[] } };
+  };
+  const msg = "Member names can't be blank or start or end with a space";
+  for (const bad of ['', 'alice ', ' alice', '   ']) {
+    const r = schema.safeParse({ name: bad });
+    assertEquals(r.success, false, JSON.stringify(bad));
+    assert(r.error!.issues.some((i) => i.message === msg), JSON.stringify(bad));
+  }
+  for (const good of ['alice', 'a', 'alice smith']) {
+    assertEquals(schema.safeParse({ name: good }).success, true, good);
   }
 });
