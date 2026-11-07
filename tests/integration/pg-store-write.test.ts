@@ -66,9 +66,19 @@ Deno.test('storeBatch cap and success', () =>
 Deno.test('storeBatch is all-or-nothing', () =>
   withWorld(async (w, admin, mk) => {
     const [s] = mk(w.rw.id);
-    await assertRejects(() =>
-      s.storeBatch(w.alpha.name, [req('ok'), { content: 'bad', category: 'nope' as never, tags: [] }])
-    );
+    const logged: unknown[][] = [];
+    const orig = console.error;
+    console.error = (...a: unknown[]) => void logged.push(a);
+    try {
+      await assertRejects(() =>
+        s.storeBatch(w.alpha.name, [req('ok'), { content: 'bad', category: 'nope' as never, tags: [] }])
+      );
+    } finally {
+      console.error = orig;
+    }
+    assertEquals(logged.length, 1);
+    assertEquals(logged[0][0], 'database error');
+    assertEquals(logged[0][1], '23514');
     const [r] = await admin`select count(*)::int as n from agent_memory.memories where scope_id = ${w.alpha.id}`;
     assertEquals(r.n, 0);
   }));
