@@ -73,6 +73,7 @@ export class PgMemoryStore implements MemoryStore {
       const code = (e as { code?: string }).code;
       const mapped = code ? onPgError?.(code) : undefined;
       if (mapped) throw mapped;
+      console.error('database error', code, (e as Error).message);
       throw new Error('Database error');
     }
   }

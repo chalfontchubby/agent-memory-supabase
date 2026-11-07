@@ -2,7 +2,7 @@
 // Requires, in other shells:  `supabase start`  and  `supabase functions serve agent-memory`.
 import { assert, assertEquals, assertStringIncludes } from '@std/assert';
 import { Client, StreamableHTTPClientTransport } from 'npm:@modelcontextprotocol/client@2.4.0';
-import { adminSql, makeWorld } from '../helpers/fixtures.ts';
+import { adminSql, makeWorld, type World } from '../helpers/fixtures.ts';
 import { generateToken, hashToken } from '../../supabase/functions/_shared/tokens.ts';
 
 const URL_ = Deno.env.get('FUNCTION_URL') ?? 'http://127.0.0.1:54321/functions/v1/agent-memory';
@@ -33,14 +33,12 @@ async function post(headers: Record<string, string>, path = '', body: unknown = 
 
 Deno.test('edge function end-to-end over MCP', async () => {
   const sql = adminSql();
-  const w = await makeWorld(sql);
-  const tokenIds: string[] = [];
+  let w: World | undefined;
   const issue = async (memberId: string) => {
     const t = generateToken();
     const [r] = await sql`
       insert into agent_memory.access_tokens (member_id, name, token_hash)
       values (${memberId}, 'e2e', ${await hashToken(t)}) returning id`;
-    tokenIds.push(r.id);
     return { token: t, id: r.id as string };
   };
   const clients: Client[] = [];
@@ -50,9 +48,11 @@ Deno.test('edge function end-to-end over MCP', async () => {
     return c;
   };
   try {
-    const rw = await issue(w.rw.id);
-    const ro = await issue(w.ro.id);
-    const none = await issue(w.none.id);
+    const world = await makeWorld(sql);
+    w = world;
+    const rw = await issue(world.rw.id);
+    const ro = await issue(world.ro.id);
+    const none = await issue(world.none.id);
 
     await t('tools/list returns 11 tools', async () => {
       const c = await open(rw.token);
@@ -65,20 +65,25 @@ Deno.test('edge function end-to-end over MCP', async () => {
         await c.callTool({
           name: 'store',
           arguments: {
-            scope: w.alpha.name,
+            scope: world.alpha.name,
             content: 'the quokka prefers eucalyptus',
             category: 'learning',
             tags: ['e2e'],
           },
         }),
       );
-      assertEquals(stored.scope, w.alpha.name);
-      assertEquals(stored.createdBy, w.rw.name);
+      assertEquals(stored.scope, world.alpha.name);
+      assertEquals(stored.createdBy, world.rw.name);
 
       const other = parse(
         await c.callTool({
           name: 'store',
-          arguments: { scope: w.alpha.name, content: 'quokkas eat eucalyptus leaves', category: 'learning', tags: [] },
+          arguments: {
+            scope: world.alpha.name,
+            content: 'quokkas eat eucalyptus leaves',
+            category: 'learning',
+            tags: [],
+          },
         }),
       );
 
@@ -103,24 +108,24 @@ Deno.test('edge function end-to-end over MCP', async () => {
     });
 
     await t('spoofing a member id changes nothing', async () => {
-      const c = await open(rw.token, { 'X-Member-Id': w.ro.id });
+      const c = await open(rw.token, { 'X-Member-Id': world.ro.id });
       const m = parse(
         await c.callTool({
           name: 'store',
           arguments: {
-            scope: w.alpha.name,
+            scope: world.alpha.name,
             content: 'spoof attempt',
             category: 'other',
             tags: [],
-            member_id: w.ro.id,
+            member_id: world.ro.id,
           },
         }),
       );
-      assertEquals(m.createdBy, w.rw.name);
+      assertEquals(m.createdBy, world.rw.name);
     });
 
     await t('bad tokens get 401', async () => {
-      const revoked = await issue(w.rw.id);
+      const revoked = await issue(world.rw.id);
       await sql`update agent_memory.access_tokens set revoked_at = now() where id = ${revoked.id}`;
       const body = { jsonrpc: '2.0', id: 1, method: 'tools/list' };
       const cases: Record<string, string>[] = [
@@ -140,7 +145,7 @@ Deno.test('edge function end-to-end over MCP', async () => {
       const c = await open(ro.token);
       const r = await c.callTool({
         name: 'store',
-        arguments: { scope: w.alpha.name, content: 'nope', category: 'other', tags: [] },
+        arguments: { scope: world.alpha.name, content: 'nope', category: 'other', tags: [] },
       });
       assertEquals(r.isError, true);
       assertStringIncludes(text(r), 'No write access');
@@ -151,6 +156,22 @@ Deno.test('edge function end-to-end over MCP', async () => {
       assertEquals(parse(await c.callTool({ name: 'list_scopes', arguments: {} })), { count: 0, scopes: [] });
     });
 
+    await t('/embed rejects oversize and malformed bodies', async () => {
+      const auth = { authorization: `Bearer ${rw.token}` };
+      const big = await post(auth, '/embed', { text: 'x'.repeat(20_001) });
+      assertEquals(big.status, 413);
+      assertEquals(JSON.parse(big.body), { error: 'text too large' });
+      assertEquals((await post(auth, '/embed', { text: 'x'.repeat(70_000) })).status, 413);
+      const res = await fetch(URL_ + '/embed', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...auth },
+        body: '{not json',
+      });
+      assertEquals(res.status, 400);
+      await res.body?.cancel();
+      assertEquals((await post(auth, '/embed', { text: 5 })).status, 400);
+    });
+
     await t('/embed returns a 384-length vector, and needs a token', async () => {
       const r = await post({ authorization: `Bearer ${rw.token}` }, '/embed', { text: 'hello world' });
       assertEquals(r.status, 200);
@@ -158,13 +179,12 @@ Deno.test('edge function end-to-end over MCP', async () => {
       assertEquals((await post({}, '/embed', { text: 'hi' })).status, 401);
     });
   } finally {
-    for (const c of clients) await c.close().catch(() => {});
-    for (const id of tokenIds) {
-      await sql`update agent_memory.access_tokens set revoked_at = coalesce(revoked_at, now()) where id = ${id}`;
+    try {
+      for (const c of clients) await c.close().catch(() => {});
+      await w?.cleanup();
+    } finally {
+      await sql.end();
     }
-    await w.cleanup();
-    await sql`delete from agent_memory.access_tokens where id = any(${tokenIds}::uuid[])`;
-    await sql.end();
   }
 });
 

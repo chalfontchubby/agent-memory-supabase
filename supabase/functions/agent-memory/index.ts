@@ -8,8 +8,14 @@ import { registerTools } from '../_shared/tools.ts';
 const VERSION = '0.1.0';
 
 // Module level: reused across requests on a warm worker.
-const sql = connect(Deno.env.get('SUPABASE_DB_URL')!);
+const dbUrl = Deno.env.get('SUPABASE_DB_URL');
+if (!dbUrl) throw new Error('SUPABASE_DB_URL is not set');
+const sql = connect(dbUrl);
 const embedder = new GteSmallEmbedder();
+
+const EMBED_MAX_BYTES = 64 * 1024;
+const EMBED_MAX_CHARS = 20_000;
+const tooLarge = () => Response.json({ error: 'text too large' }, { status: 413 });
 
 const unauthorized = () => Response.json({ error: 'invalid or missing token' }, { status: 401 });
 
@@ -20,19 +26,36 @@ async function authenticate(req: Request): Promise<string | null> {
 }
 
 async function handle(req: Request): Promise<Response> {
-  const memberId = await authenticate(req);
+  let memberId: string | null;
+  try {
+    memberId = await authenticate(req);
+  } catch (e) {
+    const err = e as { code?: string; message?: string };
+    console.error('auth lookup failed', err.code, err.message);
+    return Response.json({ error: 'service unavailable' }, { status: 503 });
+  }
   if (!memberId) return unauthorized();
 
   const path = new URL(req.url).pathname.replace(/\/+$/, '');
   if (req.method === 'POST' && path.endsWith('/embed')) {
-    const body = await req.json().catch(() => null);
+    const declared = req.headers.get('content-length');
+    if (declared !== null && Number(declared) > EMBED_MAX_BYTES) return tooLarge();
+    const raw = await req.text();
+    if (raw.length > EMBED_MAX_BYTES) return tooLarge();
+    let body: { text?: unknown } | null = null;
+    try {
+      body = JSON.parse(raw);
+    } catch {
+      body = null;
+    }
+    if (typeof body?.text === 'string' && body.text.length > EMBED_MAX_CHARS) return tooLarge();
     if (!body || typeof body.text !== 'string' || body.text === '') {
       return Response.json({ error: 'text is required' }, { status: 400 });
     }
     try {
       return Response.json({ embedding: await embedder.embed(body.text) });
-    } catch (e) {
-      return Response.json({ error: (e as Error).message }, { status: 500 });
+    } catch {
+      return Response.json({ error: 'Embedding failed' }, { status: 500 });
     }
   }
 
@@ -42,7 +65,7 @@ async function handle(req: Request): Promise<Response> {
     const s = new McpServer({ name: 'agent-memory-supabase', version: VERSION });
     registerTools(s, store, embedder);
     return s;
-  });
+  }, { onerror: (e) => console.error('mcp error', e) });
   return await mcp.fetch(req);
 }
 
