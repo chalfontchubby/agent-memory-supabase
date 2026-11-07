@@ -2,6 +2,10 @@ node_modules/
 dist/
 .env
 .env.*
-supabase/.temp/
-supabase/.branches/
+**/supabase/.temp/
+**/supabase/.branches/
 .DS_Store
+memories*.json
+backup*.json
+ids*.txt
+!.env.example

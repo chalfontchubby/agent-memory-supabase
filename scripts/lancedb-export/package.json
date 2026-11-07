@@ -1,0 +1,11 @@
+{
+  "name": "agent-memory-lancedb-export",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Exports an agent-memory-mcp LanceDB store to JSON for scripts/import.ts",
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "@lancedb/lancedb": "0.26.2"
+  }
+}

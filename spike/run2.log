@@ -1,0 +1,8 @@
+sequential 30 x medium embed       ok=30/30 statuses=200 p50=382ms max=1894ms maxServedPerWorker=4
+sequential 20 x long embed         ok=20/20 statuses=200 p50=531ms max=922ms maxServedPerWorker=3
+concurrent 10 x medium embed       ok=5/10 statuses=200,546 p50=622ms max=642ms maxServedPerWorker=3
+concurrent 20 x long embed         ok=8/20 statuses=546,200 p50=679ms max=895ms maxServedPerWorker=5
+sequential 20 x search             ok=20/20 statuses=200 p50=226ms max=1029ms maxServedPerWorker=6
+sequential 10 x store (seed)       ok=10/10 statuses=200 p50=604ms max=1018ms maxServedPerWorker=8
+sequential 20 x seq medium x4      ok=14/20 statuses=546,200,503 p50=1331ms max=2240ms maxServedPerWorker=5
+sequential 20 x seq short x5 (recall) ok=20/20 statuses=200 p50=535ms max=1100ms maxServedPerWorker=3

@@ -1,0 +1,10 @@
+const ref = Deno.env.get("SUPABASE_PROJECT_REF")!, tok = Deno.env.get("SUPABASE_ACCESS_TOKEN")!;
+const sql = Deno.args[0];
+const start = Deno.args[1] ?? new Date(Date.now() - 3600e3).toISOString();
+const u = new URL(`https://api.supabase.com/v1/projects/${ref}/analytics/endpoints/logs`);
+u.searchParams.set("sql", sql); u.searchParams.set("iso_timestamp_start", start);
+u.searchParams.set("iso_timestamp_end", new Date().toISOString());
+const r = await fetch(u, { headers: { Authorization: `Bearer ${tok}` } });
+const raw = await r.text(); if (Deno.env.get("RAW")) console.log(r.status, raw.slice(0, 600)); const j = JSON.parse(raw);
+if (j.error) console.log(JSON.stringify(j.error).slice(0, 800));
+for (const row of j.result ?? []) console.log(JSON.stringify(row));

@@ -1,0 +1,138 @@
+// Smoke test: runs every tool once through the real MCP endpoint.
+//   AGENT_MEMORY_URL=https://<ref>.supabase.co/functions/v1/agent-memory AGENT_MEMORY_TOKEN=amm_... \
+//     deno run -A scripts/smoke.ts --scope <name>
+// The token's member needs write on the scope. Everything stored is deleted again.
+import { parseArgs } from 'jsr:@std/cli@1.0.9/parse-args';
+import { Client, StreamableHTTPClientTransport } from 'npm:@modelcontextprotocol/client@2.4.0';
+
+// deno-lint-ignore no-explicit-any
+type Json = any;
+
+const args = parseArgs(Deno.args, { string: ['scope'] });
+const url = Deno.env.get('AGENT_MEMORY_URL');
+const token = Deno.env.get('AGENT_MEMORY_TOKEN');
+if (!url || !token || !args.scope) {
+  console.error(
+    'Usage: AGENT_MEMORY_URL=... AGENT_MEMORY_TOKEN=... deno run -A scripts/smoke.ts --scope <name>',
+  );
+  Deno.exit(2);
+}
+const scope: string = args.scope;
+
+const client = new Client({ name: 'smoke', version: '0.0.0' });
+await client.connect(
+  new StreamableHTTPClientTransport(new URL(url), {
+    requestInit: { headers: { Authorization: `Bearer ${token}` } },
+  }),
+);
+
+/** Calls a tool; retries once on a 546/503 (the platform recycles a busy worker). */
+async function call(name: string, a: Record<string, unknown>): Promise<Json> {
+  for (let attempt = 0;; attempt++) {
+    try {
+      const r: Json = await client.callTool({ name, arguments: a });
+      const text: string = r.content?.[0]?.text ?? '';
+      if (r.isError) throw new Error(text);
+      return JSON.parse(text);
+    } catch (e) {
+      if (attempt === 0 && /\b(546|503)\b/.test(String(e))) continue;
+      throw e;
+    }
+  }
+}
+
+let failures = 0;
+async function step(name: string, fn: () => Promise<void>) {
+  const t0 = performance.now();
+  try {
+    await fn();
+    console.log(`PASS ${name} (${Math.round(performance.now() - t0)} ms)`);
+  } catch (e) {
+    failures++;
+    console.log(`FAIL ${name}: ${(e as Error).message}`);
+  }
+}
+function ok(cond: unknown, msg: string) {
+  if (!cond) throw new Error(msg);
+}
+
+const created: string[] = [];
+let id = '';
+let sibling = '';
+
+await step('tools/list', async () => {
+  const n = (await client.listTools()).tools.length;
+  ok(n === 11, `expected 11 tools, got ${n}`);
+});
+await step('list_scopes', async () => {
+  const r = await call('list_scopes', {});
+  const s = r.scopes.find((x: Json) => x.scope === scope);
+  ok(s, `scope '${scope}' not listed`);
+  ok(s.access === 'write', `expected write access, got ${s.access}`);
+});
+await step('store', async () => {
+  const r = await call('store', {
+    scope,
+    content: 'smoke test: the quokka prefers eucalyptus',
+    category: 'learning',
+    tags: ['smoke-test'],
+  });
+  ok(r.id && r.scope === scope, 'no id or wrong scope');
+  id = r.id;
+  created.push(id);
+});
+await step('store_batch', async () => {
+  const r = await call('store_batch', {
+    scope,
+    memories: [
+      { content: 'smoke test: eucalyptus leaves are a quokka snack', category: 'learning', tags: ['smoke-test'] },
+      { content: 'smoke test: a second batch memory', category: 'other', tags: ['smoke-test'] },
+    ],
+  });
+  ok(r.stored === 2, `stored ${r.stored}`);
+  sibling = r.memories[0].id;
+  for (const m of r.memories) created.push(m.id);
+});
+await step('search', async () => {
+  const r = await call('search', { query: 'quokka eucalyptus', scopes: [scope] });
+  ok(r.results.some((x: Json) => x.memory.id === id), 'stored memory not found');
+});
+await step('recall', async () => {
+  const r = await call('recall', { topics: ['quokka'], scopes: [scope] });
+  ok(r.byTopic, 'no byTopic');
+});
+await step('find_related', async () => {
+  const r = await call('find_related', { memory_id: id, scopes: [scope] });
+  ok(r.results.some((x: Json) => x.memory.id === sibling), 'sibling not related');
+});
+await step('list_recent', async () => {
+  const r = await call('list_recent', { limit: 10, scopes: [scope] });
+  ok(r.memories.some((m: Json) => m.id === id), 'stored memory not recent');
+});
+await step('update', async () => {
+  const r = await call('update', { id, tags: ['smoke-test', 'updated'] });
+  ok(r.tags.includes('updated'), 'tags not updated');
+});
+await step('stats', async () => {
+  const r = await call('stats', { scopes: [scope] });
+  ok(r && typeof r === 'object', 'no stats');
+});
+await step('prune (dry run)', async () => {
+  const r = await call('prune', { scope, dryRun: true });
+  ok(r.dryRun !== false, 'dry run was not a dry run');
+});
+await step('search burst x3', async () => {
+  const rs = await Promise.all([1, 2, 3].map((i) => call('search', { query: `quokka burst ${i}`, scopes: [scope] })));
+  ok(rs.every((r) => Array.isArray(r.results)), 'a burst search failed');
+});
+await step('delete', async () => {
+  for (const m of created) {
+    await call('delete', { id: m });
+  }
+  created.length = 0;
+});
+
+await client.close();
+if (created.length) console.log(`WARNING: ${created.length} memories left in '${scope}': ${created.join(', ')}`);
+console.log(failures ? `${failures} FAILED` : 'ALL PASSED');
+Deno.exit(failures ? 1 : 0);
