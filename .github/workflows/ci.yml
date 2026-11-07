@@ -15,7 +15,7 @@ jobs:
           deno-version: v2.x
       - uses: supabase/setup-cli@v1
         with:
-          version: latest
+          version: 3.0.0
       - run: deno task check
       - run: deno task test:unit
       - run: supabase db start
