@@ -226,6 +226,39 @@ export async function eraseMemory(sql: Sql, id: string): Promise<void> {
   if (!ok) throw new Error(`Memory ${id} not found`);
 }
 
+export interface ThreadSummary {
+  id: string;
+  scope: string;
+  title: string;
+  deletedAt: Date | null;
+}
+
+/** A thread, live or soft-deleted, or null when there is none with that id (or the id is not a UUID). */
+export async function threadSummary(sql: Sql, id: string): Promise<ThreadSummary | null> {
+  if (!UUID.test(id)) return null;
+  const [r] = await sql`
+    select t.id, s.name as scope, t.title, t.deleted_at as "deletedAt"
+    from agent_memory.threads t join agent_memory.scopes s on s.id = t.scope_id where t.id = ${id}::uuid`;
+  return (r as ThreadSummary | undefined) ?? null;
+}
+
+/** Soft-delete a thread (recoverable for 30 days) and log it. */
+export async function deleteThread(sql: Sql, id: string): Promise<void> {
+  if (!UUID.test(id)) throw new Error(`Thread ${id} not found`);
+  await adm(() => sql`select agent_memory.adm_delete_thread(${id}::uuid, null, ${grantor()})`);
+}
+
+export async function restoreThread(sql: Sql, id: string): Promise<void> {
+  const ok = UUID.test(id) && (await sql`select agent_memory.restore_thread(${id}::uuid) as ok`)[0].ok;
+  if (!ok) throw new Error(`Thread ${id} not found or not deleted`);
+}
+
+/** Hard-delete a thread now (live or soft-deleted); its posts, links and subscriptions go with it. Not reversible. */
+export async function eraseThread(sql: Sql, id: string): Promise<void> {
+  const ok = UUID.test(id) && (await sql`select agent_memory.erase_thread(${id}::uuid) as ok`)[0].ok;
+  if (!ok) throw new Error(`Thread ${id} not found`);
+}
+
 export interface DeletedFilter {
   scope?: string;
   /** Member display name, or 'admin' for deletions made without a member. */

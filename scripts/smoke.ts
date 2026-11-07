@@ -53,6 +53,17 @@ const BASE_TOOLS = [
   'delete',
   'stats',
   'prune',
+  'create_thread',
+  'post',
+  'read_thread',
+  'list_threads',
+  'resolve_thread',
+  'reopen_thread',
+  'link_memory',
+  'unlink_memory',
+  'subscribe',
+  'unsubscribe',
+  'whats_new',
 ];
 
 let failures = 0;
@@ -73,6 +84,9 @@ function ok(cond: unknown, msg: string) {
 const created: string[] = [];
 let id = '';
 let sibling = '';
+let adminTools = false;
+let threadId = '';
+let sessionId = '';
 
 await step('tools/list', async () => {
   const names = (await client.listTools()).tools.map((t) => t.name);
@@ -81,6 +95,7 @@ await step('tools/list', async () => {
   const extra = names.filter((t) => !BASE_TOOLS.includes(t));
   const stray = extra.filter((t) => !t.startsWith('admin_'));
   ok(stray.length === 0, `unexpected non-admin tools: ${stray.join(', ')}`);
+  adminTools = extra.includes('admin_delete_thread');
   console.log(extra.length ? `  saw base + ${extra.length} admin tools (admin token)` : '  saw base tools only');
 });
 await step('list_scopes', async () => {
@@ -144,6 +159,47 @@ await step('search burst x3', async () => {
   const rs = await Promise.all([1, 2, 3].map((i) => call('search', { query: `quokka burst ${i}`, scopes: [scope] })));
   ok(rs.every((r) => Array.isArray(r.results)), 'a burst search failed');
 });
+await step('create_thread', async () => {
+  const r = await call('create_thread', {
+    scope,
+    title: 'smoke test thread',
+    body: 'smoke test: first post',
+    memory_ids: [id],
+    session_label: 'smoke',
+  });
+  ok(r.thread?.id, 'no thread id');
+  ok(r.session?.id, 'no session id');
+  threadId = r.thread.id;
+  sessionId = r.session.id;
+});
+await step('post', async () => {
+  const r = await call('post', { thread_id: threadId, body: 'smoke test: second post', session: sessionId });
+  ok(r.post?.seq >= 2, `unexpected post seq ${r.post?.seq}`);
+});
+await step('read_thread', async () => {
+  const r = await call('read_thread', { thread_id: threadId, session: sessionId });
+  ok(r.posts?.length >= 1, 'no posts');
+  ok(r.links?.some((l: Json) => l.memoryId === id), 'linked memory not listed');
+});
+await step('recall carries the thread', async () => {
+  const r = await call('recall', { topics: ['quokka eucalyptus'], scopes: [scope] });
+  const hit = Object.values(r.byTopic as Record<string, Json[]>).flat().find((x) => x.memory.id === id);
+  ok(hit, 'stored memory not recalled');
+  ok(hit.memory.threads?.some((t: Json) => t.id === threadId), 'recalled memory does not list the thread');
+});
+await step('whats_new', async () => {
+  const r = await call('whats_new', { session: sessionId });
+  ok(Array.isArray(r.threads), 'no threads array');
+});
+await step('resolve_thread', async () => {
+  const r = await call('resolve_thread', { thread_id: threadId, note: 'smoke test done', session: sessionId });
+  ok(r.thread?.status === 'resolved', `status ${r.thread?.status}`);
+});
+await step('admin_delete_thread', async () => {
+  if (!adminTools) return;
+  await call('admin_delete_thread', { thread_id: threadId });
+  threadId = '';
+});
 await step('delete', async () => {
   for (const m of created) {
     await call('delete', { id: m });
@@ -152,6 +208,7 @@ await step('delete', async () => {
 });
 
 await client.close();
+if (threadId) console.log(`WARNING: thread ${threadId} left resolved in '${scope}'`);
 if (created.length) console.log(`WARNING: ${created.length} memories left in '${scope}': ${created.join(', ')}`);
 console.log(failures ? `${failures} FAILED` : 'ALL PASSED');
 Deno.exit(failures ? 1 : 0);

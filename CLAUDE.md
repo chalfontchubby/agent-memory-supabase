@@ -38,13 +38,14 @@ boot a half-written file and fail with BOOT_ERROR or "Unexpected eof".
   returns `{ memberId, isAdmin }`. Identity comes only from the token; nothing in the request body or headers can name a
   member.
 - **MCP server:** a fresh, stateless McpServer is built per request. `registerTools` (`_shared/tools.ts`) adds the 11
-  memory tools. `registerAdminTools` (`_shared/admin-tools.ts`) adds the 12 `admin_` tools for admins only.
+  memory tools, and `registerThreadTools` (`_shared/thread-tools.ts`) the 11 thread tools, so every member gets 22.
+  `registerAdminTools` (`_shared/admin-tools.ts`) adds the 13 `admin_` tools for admins only.
 - **`/embed`:** `POST …/embed` returns a gte-small vector for the importer.
 
-**Running as a member.** `PgMemoryStore` (`_shared/pg-store.ts`) and `PgAdminStore` (`_shared/admin-store.ts`) run every
-query through `withMember`. That opens a transaction with `set local role agent_memory_member` and a transaction-local
-`agent_memory.member_id`, so RLS and the SECURITY DEFINER functions see the caller. The function connects as `postgres`,
-but no member work runs as postgres.
+**Running as a member.** `PgMemoryStore` (`_shared/pg-store.ts`), `PgThreadStore` (`_shared/thread-store.ts`) and
+`PgAdminStore` (`_shared/admin-store.ts`) run every query through `withMember`. That opens a transaction with
+`set local role agent_memory_member` and a transaction-local `agent_memory.member_id`, so RLS and the SECURITY DEFINER
+functions see the caller. The function connects as `postgres`, but no member work runs as postgres.
 
 **Where the rules live: Postgres, not TypeScript.** Migrations in `supabase/migrations/` hold the schema, RLS policies,
 member column-level grants and every SECURITY DEFINER function (`search_path = ''`, fully qualified names, execute

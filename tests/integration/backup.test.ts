@@ -7,6 +7,7 @@ import { exportBackup, restoreBackup } from '../../scripts/backup.ts';
 import { adminSql, LOCAL_DB_URL } from '../helpers/fixtures.ts';
 
 const sql = adminSql();
+let keepDir = false; // set when a safety restore failed, so the snapshot file survives
 const dir = await Deno.makeTempDir({ prefix: 'backup-test-' });
 
 const vec = (seed: number) => `[${Array.from({ length: 384 }, (_, i) => Math.sin(seed + i) / 10).join(',')}]`;
@@ -168,6 +169,156 @@ Deno.test('backup and restore-backup round trip', async () => {
     } finally {
       await sql.end();
     }
-    if (safe) await Deno.remove(dir, { recursive: true });
+    if (!safe) keepDir = true;
   }
+});
+
+type DbSql = ReturnType<typeof adminSql>;
+
+/** Empties the shared local DB for `fn`, then puts back what was there (as the test above does). */
+async function withEmptyDb(fn: (db: DbSql) => Promise<void>) {
+  const db = adminSql();
+  const original = await exportBackup(db);
+  const originalFile = `${dir}/original-${crypto.randomUUID()}.json`;
+  await Deno.writeTextFile(originalFile, JSON.stringify(original), { mode: 0o600 });
+  let safe = false;
+  try {
+    await db`truncate agent_memory.memories, agent_memory.memory_history, agent_memory.scope_grants,
+      agent_memory.access_tokens, agent_memory.members, agent_memory.scopes cascade`;
+    await fn(db);
+  } finally {
+    try {
+      await db`truncate agent_memory.memories, agent_memory.memory_history, agent_memory.scope_grants,
+        agent_memory.access_tokens, agent_memory.members, agent_memory.scopes cascade`;
+      await restoreBackup(db, original);
+      safe = true;
+    } catch (e) {
+      console.error(`Safety restore failed (${(e as Error).message}); the snapshot is kept at ${originalFile}`);
+    }
+    await db.end();
+    if (safe) await Deno.remove(originalFile);
+    else keepDir = true;
+  }
+}
+
+/** Two scopes, two members, sessions, threads (one soft-deleted), posts, links and subscriptions. */
+async function seedThreads(db: DbSql) {
+  const [a] = await db`insert into agent_memory.scopes (name) values ('th-alpha') returning id`;
+  const [b] = await db`insert into agent_memory.scopes (name) values ('th-beta') returning id`;
+  const [ann] = await db`insert into agent_memory.members (display_name, kind) values ('th-ann', 'human') returning id`;
+  const [bot] = await db`insert into agent_memory.members (display_name, kind) values ('th-bot', 'bot') returning id`;
+  const [cat] = await db`insert into agent_memory.members (display_name, kind) values ('th-cat', 'human') returning id`;
+  await db`insert into agent_memory.scope_grants (scope_id, member_id, access)
+    values (${a.id}, ${ann.id}, 'write'), (${b.id}, ${bot.id}, 'write')`;
+  const [s1] = await db`insert into agent_memory.agent_sessions (member_id, label, created_at, last_seen_at)
+    values (${ann.id}, 'one', '2026-02-03 04:05:06.123456+00', '2026-02-03 04:05:07.654321+00') returning id`;
+  const [s2] = await db`insert into agent_memory.agent_sessions (member_id, label)
+    values (${bot.id}, null) returning id`;
+  const [s3] = await db`insert into agent_memory.agent_sessions (member_id, label)
+    values (${cat.id}, 'unrelated') returning id`;
+  const mem = async (scope: string, content: string, seed: number, by: string, cs: string | null, us: string | null) =>
+    (await db`insert into agent_memory.memories
+      (scope_id, content, category, tags, created_by, updated_by, created_session, updated_session, embedding)
+      values (${scope}, ${content}, 'learning', ${db.array(['t'], 1009)}, ${by}, ${by}, ${cs}, ${us},
+              ${vec(seed)}::extensions.vector) returning id`)[0].id as string;
+  const mA = await mem(a.id, 'alpha memory', 1, ann.id, s1.id, s1.id);
+  const mB = await mem(b.id, 'beta memory', 2, bot.id, null, null);
+  const [tA] = await db`insert into agent_memory.threads
+    (scope_id, title, status, created_by, created_session, created_at, last_post_at, post_count, resolved_at, resolved_by)
+    values (${a.id}, 'alpha thread', 'resolved', ${ann.id}, ${s1.id}, '2026-03-01 00:00:00.111111+00',
+            '2026-03-02 00:00:00.222222+00', 2, '2026-03-02 00:00:00.222222+00', ${ann.id}) returning id`;
+  const [tB] = await db`insert into agent_memory.threads
+    (scope_id, title, created_by, created_session, deleted_at, post_count)
+    values (${b.id}, 'beta thread', ${bot.id}, ${s2.id}, '2026-04-01 00:00:00.333333+00', 1) returning id`;
+  await db`insert into agent_memory.thread_posts (thread_id, seq, kind, body, author_id, session_id, created_at)
+    values (${tA.id}, 1, 'post', 'first', ${ann.id}, ${s1.id}, '2026-03-01 00:00:00.111111+00'),
+           (${tA.id}, 2, 'resolve', 'done', ${ann.id}, null, '2026-03-02 00:00:00.222222+00'),
+           (${tB.id}, 1, 'post', 'beta post', ${bot.id}, ${s2.id}, now())`;
+  await db`insert into agent_memory.thread_links (thread_id, memory_id, linked_by, linked_at)
+    values (${tA.id}, ${mA}, ${ann.id}, '2026-03-01 00:00:01.444444+00'),
+           (${tA.id}, ${mB}, ${ann.id}, '2026-03-01 00:00:02.555555+00'),
+           (${tB.id}, ${mB}, ${bot.id}, now())`;
+  await db`insert into agent_memory.thread_subscriptions (session_id, thread_id, last_seen_seq, subscribed_at)
+    values (${s1.id}, ${tA.id}, 2, '2026-03-01 00:00:03.666666+00'), (${s2.id}, ${tB.id}, 0, now()),
+           (${s3.id}, ${tB.id}, 0, now())`;
+  return { tA: tA.id as string, tB: tB.id as string, mA, mB, s1: s1.id as string, s2: s2.id as string };
+}
+
+async function threadRows(db: DbSql) {
+  return {
+    sessions: await db`select id, member_id, label, created_at::text, last_seen_at::text
+      from agent_memory.agent_sessions order by id`,
+    threads: await db`select id, scope_id, title, status, created_by, created_session, created_at::text,
+      last_post_at::text, post_count, resolved_at::text, resolved_by, deleted_at::text
+      from agent_memory.threads order by id`,
+    posts: await db`select thread_id, seq, kind, body, author_id, session_id, created_at::text
+      from agent_memory.thread_posts order by thread_id, seq`,
+    links: await db`select thread_id, memory_id, linked_by, linked_at::text
+      from agent_memory.thread_links order by thread_id, memory_id`,
+    subs: await db`select session_id, thread_id, last_seen_seq, subscribed_at::text
+      from agent_memory.thread_subscriptions order by session_id, thread_id`,
+    memSessions: await db`select id, created_session, updated_session from agent_memory.memories order by id`,
+  };
+}
+
+Deno.test('backup round-trips threads, posts, links, sessions and subscriptions', () =>
+  withEmptyDb(async (db) => {
+    await seedThreads(db);
+    const before = await threadRows(db);
+    assertEquals(before.threads.length, 2);
+    const file = `${dir}/threads.json`;
+    const r1 = await cli('backup', '--out', file);
+    assertEquals(r1.code, 0, r1.err);
+    const data = JSON.parse(await Deno.readTextFile(file));
+    assertEquals(data.sessions.length, 3);
+    assertEquals(data.threads.length, 2);
+    assertEquals(data.threadPosts.length, 3);
+    assertEquals(data.threadLinks.length, 3);
+    assertEquals(data.subscriptions.length, 3);
+    assertEquals(data.version, 1);
+
+    await db`truncate agent_memory.memories, agent_memory.memory_history, agent_memory.scope_grants,
+      agent_memory.access_tokens, agent_memory.members, agent_memory.scopes cascade`;
+    const r2 = await cli('restore-backup', file);
+    assertEquals(r2.code, 0, r2.err);
+    assertEquals(await threadRows(db), before);
+
+    // a file written before threads existed still restores
+    await db`truncate agent_memory.memories, agent_memory.memory_history, agent_memory.scope_grants,
+      agent_memory.access_tokens, agent_memory.members, agent_memory.scopes cascade`;
+    for (const k of ['sessions', 'threads', 'threadPosts', 'threadLinks', 'subscriptions']) delete data[k];
+    for (const m of data.memories) {
+      delete m.createdSession;
+      delete m.updatedSession;
+    }
+    await restoreBackup(db, data);
+    assertEquals((await db`select count(*)::int as n from agent_memory.memories`)[0].n, 2);
+    assertEquals((await db`select count(*)::int as n from agent_memory.threads`)[0].n, 0);
+  }));
+
+Deno.test('scoped backup drops links to memories outside the scope', () =>
+  withEmptyDb(async (db) => {
+    const ids = await seedThreads(db);
+    const file = `${dir}/scoped.json`;
+    const r = await cli('backup', '--scope', 'th-alpha', '--out', file);
+    assertEquals(r.code, 0, r.err);
+    const d = JSON.parse(await Deno.readTextFile(file));
+    assertEquals(d.threads.map((t: { id: string }) => t.id), [ids.tA]);
+    assertEquals(d.threadPosts.length, 2);
+    assertEquals(d.threadLinks.map((l: { memoryId: string }) => l.memoryId), [ids.mA]);
+    assertEquals(d.sessions.map((s: { id: string }) => s.id), [ids.s1]);
+    assertEquals(d.subscriptions.map((s: { sessionId: string }) => s.sessionId), [ids.s1]);
+    assertEquals(d.members.map((m: { displayName: string }) => m.displayName), ['th-ann']);
+    const mem = d.memories[0];
+    assertEquals([mem.createdSession, mem.updatedSession], [ids.s1, ids.s1]);
+
+    // it restores into an empty install
+    await db`truncate agent_memory.memories, agent_memory.memory_history, agent_memory.scope_grants,
+      agent_memory.access_tokens, agent_memory.members, agent_memory.scopes cascade`;
+    await restoreBackup(db, d);
+    assertEquals((await db`select count(*)::int as n from agent_memory.thread_links`)[0].n, 1);
+  }));
+
+Deno.test('remove the backup test directory', async () => {
+  if (!keepDir) await Deno.remove(dir, { recursive: true });
 });
