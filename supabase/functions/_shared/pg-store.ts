@@ -1,5 +1,6 @@
 import type postgres from 'npm:postgres@3.4.5';
 import { type Sql, withMember } from './db.ts';
+import { isUuid } from './thread-store.ts';
 import { applyDecay, importanceMultiplier, isEvergreen, parseDecayHalfLife } from './decay.ts';
 import {
   checkContent,
@@ -23,6 +24,7 @@ import type {
   SearchFilters,
   SearchMode,
   SearchResult,
+  SessionRef,
   StoreRequest,
   UpdateRequest,
 } from './types.ts';
@@ -36,7 +38,7 @@ type Row = Record<string, any>;
 const iso = (v: Date | string): string => (v instanceof Date ? v.toISOString() : new Date(v).toISOString());
 
 export function rowToMemory(r: Row): Memory {
-  return {
+  const m: Memory = {
     id: r.id,
     scope: r.scope,
     content: r.content,
@@ -47,12 +49,20 @@ export function rowToMemory(r: Row): Memory {
     createdBy: r.created_by,
     updatedBy: r.updated_by,
   };
+  if (r.created_session_label != null) m.createdSession = r.created_session_label;
+  if (r.updated_session_label != null) m.updatedSession = r.updated_session_label;
+  return m;
 }
 
 const SEARCH_MODES: readonly string[] = ['hybrid', 'keyword', 'semantic'];
 const vec = (e: number[]): string => JSON.stringify(e);
 const notFoundMemory = (id: string) => new StoreError(`Memory ${id} not found`);
 const noWrite = (scope: string) => new StoreError(`No write access to scope '${scope}'`);
+
+/** A malformed session id fails before any embedding or query. */
+function checkSessionId(s?: SessionRef): void {
+  if (s?.session !== undefined && !isUuid(s.session)) throw new StoreError('Session not found');
+}
 
 export class PgMemoryStore implements MemoryStore {
   constructor(
@@ -69,6 +79,7 @@ export class PgMemoryStore implements MemoryStore {
     } catch (e) {
       if (e instanceof StoreError) throw e;
       const code = (e as { code?: string }).code;
+      if (code === 'P0001') throw new StoreError((e as Error).message);
       const mapped = code ? onPgError?.(code) : undefined;
       if (mapped) throw mapped;
       console.error('database error', code, (e as Error).message);
@@ -91,6 +102,30 @@ export class PgMemoryStore implements MemoryStore {
     return s.id;
   }
 
+  /** Resolves the named session (never creating one) inside the write transaction; null when none was named. */
+  private async resolveSession(tx: Tx, s?: SessionRef): Promise<string | null> {
+    if (!s || (s.session === undefined && s.sessionLabel === undefined)) return null;
+    if (s.session !== undefined && !isUuid(s.session)) throw new StoreError('Session not found');
+    const rows = await tx<Row[]>`
+      select id from agent_memory.resolve_session(${s.session ?? null}::uuid, ${s.sessionLabel ?? null}::text, false)`;
+    return rows[0]?.id ?? null;
+  }
+
+  /** Adds session labels to search results, which come from functions that do not return them. */
+  private async addSessionLabels(tx: Tx, results: SearchResult[]): Promise<void> {
+    if (results.length === 0) return;
+    const ids = results.map((r) => r.memory.id);
+    const rows = await tx<Row[]>`
+      select id, created_session_label, updated_session_label from agent_memory.memory_view
+      where id = any(${ids}::uuid[])`;
+    const byId = new Map(rows.map((x) => [x.id, x]));
+    for (const r of results) {
+      const x = byId.get(r.memory.id);
+      if (x?.created_session_label != null) r.memory.createdSession = x.created_session_label;
+      if (x?.updated_session_label != null) r.memory.updatedSession = x.updated_session_label;
+    }
+  }
+
   async listScopes(): Promise<ScopeInfo[]> {
     return await this.run(async (tx) => {
       const rows = await tx<Row[]>`
@@ -109,11 +144,12 @@ export class PgMemoryStore implements MemoryStore {
     });
   }
 
-  async store(scope: string, r: StoreRequest): Promise<Memory> {
-    return (await this.storeBatch(scope, [r]))[0];
+  async store(scope: string, r: StoreRequest, s?: SessionRef): Promise<Memory> {
+    return (await this.storeBatch(scope, [r], s))[0];
   }
 
-  async storeBatch(scope: string, rs: StoreRequest[]): Promise<Memory[]> {
+  async storeBatch(scope: string, rs: StoreRequest[], s?: SessionRef): Promise<Memory[]> {
+    checkSessionId(s);
     if (rs.length > STORE_BATCH_MAX) {
       throw new Error(
         `store_batch accepts at most ${STORE_BATCH_MAX} memories per call on this server; ` +
@@ -126,13 +162,16 @@ export class PgMemoryStore implements MemoryStore {
     for (const r of rs) embeddings.push(await this.embedder.embed(r.content));
     return await this.run(async (tx) => {
       const scopeId = await this.writableScope(tx, scope);
+      const sessionId = await this.resolveSession(tx, s);
       const ids: string[] = [];
       for (let i = 0; i < rs.length; i++) {
         const r = rs[i];
         const ins = await tx<Row[]>`
-          insert into agent_memory.memories (scope_id, content, category, tags, created_by, updated_by, embedding)
+          insert into agent_memory.memories (scope_id, content, category, tags, created_by, updated_by, embedding,
+            created_session, updated_session)
           values (${scopeId}::uuid, ${r.content}, ${r.category}, ${tx.array(r.tags)}::text[],
-            ${this.memberId}::uuid, ${this.memberId}::uuid, ${vec(embeddings[i])}::extensions.vector)
+            ${this.memberId}::uuid, ${this.memberId}::uuid, ${vec(embeddings[i])}::extensions.vector,
+            ${sessionId}::uuid, ${sessionId}::uuid)
           returning id`;
         ids.push(ins[0].id);
       }
@@ -158,7 +197,8 @@ export class PgMemoryStore implements MemoryStore {
     return row;
   }
 
-  async update(id: string, u: UpdateRequest): Promise<Memory> {
+  async update(id: string, u: UpdateRequest, s?: SessionRef): Promise<Memory> {
+    checkSessionId(s);
     if (u.content !== undefined) checkContent(u.content);
     // Read current state first so we know whether to embed (outside the write transaction).
     const current = await this.run((tx) => this.visibleWritable(tx, id));
@@ -171,6 +211,7 @@ export class PgMemoryStore implements MemoryStore {
     }
     return await this.run(async (tx) => {
       await this.visibleWritable(tx, id);
+      const sessionId = await this.resolveSession(tx, s);
       const targetScope = u.scope !== undefined ? await this.writableScope(tx, u.scope) : null;
       const upd = await tx<Row[]>`
         update agent_memory.memories set
@@ -180,6 +221,7 @@ export class PgMemoryStore implements MemoryStore {
           scope_id = coalesce(${targetScope}::uuid, scope_id),
           embedding = coalesce(${embedding}::extensions.vector, embedding),
           updated_by = ${this.memberId}::uuid,
+          updated_session = ${sessionId}::uuid,
           updated_at = now()
         where id = ${id}::uuid and deleted_at is null
         returning id`;
@@ -319,6 +361,7 @@ export class PgMemoryStore implements MemoryStore {
           ${limit * OVER_FETCH_FACTOR}::int)`;
       const results = applyDecay(this.toDecayInputs(rows), limit, this.halfLifeDays);
       await this.touch(tx, results);
+      await this.addSessionLabels(tx, results);
       return results;
     });
   }
@@ -341,6 +384,7 @@ export class PgMemoryStore implements MemoryStore {
       }::int)`;
       const results = applyDecay(this.toDecayInputs(rows), limit, this.halfLifeDays);
       await this.touch(tx, results);
+      await this.addSessionLabels(tx, results);
       return results;
     });
   }

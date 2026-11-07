@@ -1,5 +1,6 @@
 import { z } from 'npm:zod@4.6.7';
 import type { McpServer } from 'npm:@modelcontextprotocol/server@2.4.0';
+import type { PgThreadStore } from './thread-store.ts';
 import { checkLimit, RECALL_EMBED_TOPICS_MAX, STORE_BATCH_MAX } from './limits.ts';
 import {
   type Embedder,
@@ -8,6 +9,7 @@ import {
   type MemoryStore,
   type SearchMode,
   type SearchResult,
+  type SessionRef,
   type StoreRequest,
   type UpdateRequest,
 } from './types.ts';
@@ -55,6 +57,21 @@ function scopesOrUndefined(scopes?: string[]): string[] | undefined {
   return scopes && scopes.length > 0 ? scopes : undefined;
 }
 
+const sessionShape = {
+  session: z.string().optional().describe('Your agent session id from a thread tool (optional)'),
+  session_label: z.string().optional().describe('Your agent session label (optional)'),
+};
+
+/** Only the keys the caller supplied; undefined when neither was. */
+function sessionRef(a: { session?: string; session_label?: string }): SessionRef | undefined {
+  if (a.session === undefined && a.session_label === undefined) return undefined;
+  const s: SessionRef = {};
+  if (a.session !== undefined) s.session = a.session;
+  if (a.session_label !== undefined) s.sessionLabel = a.session_label;
+  return s;
+}
+
+type SessionArgs = { session?: string; session_label?: string };
 type MemoryInput = { content: string; category: MemoryCategory; tags: string[] };
 
 // ── Handler factories ──────────────────────────────────────────────
@@ -71,10 +88,14 @@ export function handleListScopes(store: MemoryStore) {
 }
 
 export function handleStore(store: MemoryStore) {
-  return async (args: { scope: string } & MemoryInput) => {
+  return async (args: { scope: string } & MemoryInput & SessionArgs) => {
     try {
-      const { scope, ...req } = args;
-      return success(await store.store(scope, req as StoreRequest));
+      const { scope, content, category, tags } = args;
+      const req = { content, category, tags };
+      const s = sessionRef(args);
+      return success(
+        s ? await store.store(scope, req as StoreRequest, s) : await store.store(scope, req as StoreRequest),
+      );
     } catch (err) {
       return error('Failed to store memory', err);
     }
@@ -82,9 +103,12 @@ export function handleStore(store: MemoryStore) {
 }
 
 export function handleStoreBatch(store: MemoryStore) {
-  return async (args: { scope: string; memories: MemoryInput[] }) => {
+  return async (args: { scope: string; memories: MemoryInput[] } & SessionArgs) => {
     try {
-      const memories = await store.storeBatch(args.scope, args.memories as StoreRequest[]);
+      const s = sessionRef(args);
+      const memories = s
+        ? await store.storeBatch(args.scope, args.memories as StoreRequest[], s)
+        : await store.storeBatch(args.scope, args.memories as StoreRequest[]);
       return success({ stored: memories.length, memories });
     } catch (err) {
       return error('Failed to store batch', err);
@@ -119,7 +143,11 @@ export function handleSearch(store: MemoryStore) {
   };
 }
 
-export function handleRecall(store: MemoryStore, embedder: Embedder) {
+export function handleRecall(
+  store: MemoryStore,
+  embedder: Embedder,
+  threads: Pick<PgThreadStore, 'linkedThreads'>,
+) {
   return async (args: {
     topics: string[];
     include_recent?: number;
@@ -149,6 +177,11 @@ export function handleRecall(store: MemoryStore, embedder: Embedder) {
 
       // include_recent <= 0 means no recent memories, as in the original server.
       const recent = includeRecent > 0 ? await store.listRecent(includeRecent, undefined, scopes) : [];
+
+      // One lookup for every returned memory; only memories with links gain a threads key.
+      const all = [...Object.values(byTopic).flat().map((r) => r.memory), ...recent];
+      const linked = await threads.linkedThreads([...new Set(all.map((m) => m.id))]);
+      for (const m of all) if (linked[m.id]?.length) m.threads = linked[m.id];
       return success(keywordOnlyTopics.length > 0 ? { byTopic, recent, keywordOnlyTopics } : { byTopic, recent });
     } catch (err) {
       return error('Recall failed', err);
@@ -179,13 +212,15 @@ export function handleListRecent(store: MemoryStore) {
 }
 
 export function handleUpdate(store: MemoryStore) {
-  return async (args: {
-    id: string;
-    content?: string;
-    category?: MemoryCategory;
-    tags?: string[];
-    scope?: string;
-  }) => {
+  return async (
+    args: {
+      id: string;
+      content?: string;
+      category?: MemoryCategory;
+      tags?: string[];
+      scope?: string;
+    } & SessionArgs,
+  ) => {
     try {
       // Only pass the keys the caller supplied.
       const u: UpdateRequest = {};
@@ -193,7 +228,8 @@ export function handleUpdate(store: MemoryStore) {
       if (args.category !== undefined) u.category = args.category;
       if (args.tags !== undefined) u.tags = args.tags;
       if (args.scope !== undefined) u.scope = args.scope;
-      return success(await store.update(args.id, u));
+      const s = sessionRef(args);
+      return success(s ? await store.update(args.id, u, s) : await store.update(args.id, u));
     } catch (err) {
       return error('Update failed', err);
     }
@@ -240,7 +276,12 @@ export function handlePrune(store: MemoryStore) {
 
 // ── Registration ───────────────────────────────────────────────────
 
-export function registerTools(server: McpServer, store: MemoryStore, embedder: Embedder): void {
+export function registerTools(
+  server: McpServer,
+  store: MemoryStore,
+  embedder: Embedder,
+  threads: PgThreadStore,
+): void {
   server.registerTool('list_scopes', {
     description: 'List the memory scopes you can access, with your access level (read or write) and memory count.',
     inputSchema: z.object({}),
@@ -253,6 +294,7 @@ export function registerTools(server: McpServer, store: MemoryStore, embedder: E
       content: z.string().describe('The memory content — what you learnt, observed, or want to remember'),
       category: categorySchema.describe('Memory category'),
       tags: tagsSchema,
+      ...sessionShape,
     }),
   }, handleStore(store));
 
@@ -266,6 +308,7 @@ export function registerTools(server: McpServer, store: MemoryStore, embedder: E
         category: categorySchema,
         tags: tagsSchema,
       })).describe('Array of memories to store'),
+      ...sessionShape,
     }),
   }, handleStoreBatch(store));
 
@@ -289,7 +332,7 @@ export function registerTools(server: McpServer, store: MemoryStore, embedder: E
       limit_per_topic: z.number().optional().describe('Max results per topic (default 5)'),
       scopes: scopesSchema,
     }),
-  }, handleRecall(store, embedder));
+  }, handleRecall(store, embedder, threads));
 
   server.registerTool('find_related', {
     description:
@@ -320,6 +363,7 @@ export function registerTools(server: McpServer, store: MemoryStore, embedder: E
       category: categorySchema.optional().describe('New category'),
       tags: tagsSchema.optional().describe('New tags (replaces existing)'),
       scope: z.string().optional().describe('Move the memory to this scope (needs write on both)'),
+      ...sessionShape,
     }),
   }, handleUpdate(store));
 

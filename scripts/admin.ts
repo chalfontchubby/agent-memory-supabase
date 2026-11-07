@@ -8,7 +8,9 @@ import {
   type DeletedFilter,
   type DeletedRow,
   deleteScope,
+  deleteThread,
   eraseMemory,
+  eraseThread,
   grant,
   issueToken,
   listDeleted,
@@ -20,9 +22,11 @@ import {
   parseExpires,
   reactivateMember,
   restoreMemories,
+  restoreThread,
   revoke,
   revokeToken,
   setAdmin,
+  threadSummary,
 } from './lib/admin-db.ts';
 
 const USAGE = `Usage: deno run -A scripts/admin.ts <command> ...
@@ -45,6 +49,9 @@ const USAGE = `Usage: deno run -A scripts/admin.ts <command> ...
   restore <memory-id>...
   restore [--scope <s>] [--by <member|admin>] [--since <ISO date>] --yes
   erase <memory-id> --yes            (hard delete now, with its history content; not reversible)
+  delete-thread <thread-id>          (soft delete; recoverable for 30 days)
+  restore-thread <thread-id>
+  erase-thread <thread-id> --yes     (hard delete now, with its posts; not reversible)
 Without --yes, filtered restore and erase only show what they would do, and exit 1.
 Requires AGENT_MEMORY_DB_URL (direct or session-pooler connection string).`;
 
@@ -232,6 +239,31 @@ async function main(): Promise<number> {
         }
         await eraseMemory(sql, m.id);
         console.log(`Erased memory ${m.id}`);
+        break;
+      }
+      case 'delete-thread':
+        need(1, 'delete-thread <thread-id>');
+        await deleteThread(sql, p[0]);
+        console.log(`Deleted thread ${p[0]} (restore-thread brings it back for 30 days)`);
+        break;
+      case 'restore-thread':
+        need(1, 'restore-thread <thread-id>');
+        await restoreThread(sql, p[0]);
+        console.log(`Restored thread ${p[0]}`);
+        break;
+      case 'erase-thread': {
+        need(1, 'erase-thread <thread-id> --yes');
+        const t = await threadSummary(sql, p[0]);
+        if (!t) throw new Error(`Thread ${p[0]} not found`);
+        if (!args.yes) {
+          console.log(`Would erase thread ${t.id}${t.deletedAt ? ' (soft-deleted)' : ''}`);
+          console.log(`  scope: ${t.scope}`);
+          console.log(`  title: ${t.title}`);
+          console.log('This cannot be undone. Re-run with --yes to erase it.');
+          return 1;
+        }
+        await eraseThread(sql, t.id);
+        console.log(`Erased thread ${t.id}`);
         break;
       }
       default:

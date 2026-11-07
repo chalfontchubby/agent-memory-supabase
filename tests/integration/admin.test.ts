@@ -6,7 +6,9 @@ import {
   createScope,
   deactivateMember,
   deleteScope,
+  deleteThread,
   eraseMemory,
+  eraseThread,
   firstLine,
   grant,
   issueToken,
@@ -19,6 +21,7 @@ import {
   reactivateMember,
   restoreMemories,
   restoreMemory,
+  restoreThread,
   revoke,
   revokeToken,
   setAdmin,
@@ -421,3 +424,69 @@ Deno.test('admin-log is newest first, filters by actor, and holds no token', () 
 function grantorName() {
   return Deno.env.get('USER') || 'admin';
 }
+
+Deno.test('delete-thread, restore-thread and erase-thread', () =>
+  withAdmin(async (sql, s) => {
+    const sc = await createScope(sql, `team-${s}`);
+    const [m] = await sql`insert into agent_memory.members (display_name, kind) values (${'ann-' + s}, 'human')
+      returning id`;
+    const mkThread = async (title: string) => {
+      const [t] = await sql`insert into agent_memory.threads (scope_id, title, created_by, post_count)
+        values (${sc.id}, ${title}, ${m.id}, 1) returning id`;
+      await sql`insert into agent_memory.thread_posts (thread_id, seq, body, author_id)
+        values (${t.id}, 1, 'hello', ${m.id})`;
+      return t.id as string;
+    };
+    const t1 = await mkThread('first');
+    const t2 = await mkThread('second');
+    const deletedAt = async (id: string) =>
+      (await sql`select deleted_at is not null as d from agent_memory.threads where id = ${id}`)[0]?.d;
+
+    // delete-thread: soft delete, logged
+    const del = await cli('delete-thread', t1);
+    assertEquals(del.code, 0, del.err);
+    assertStringIncludes(del.out, `Deleted thread ${t1}`);
+    assertEquals(await deletedAt(t1), true);
+    const log = await sql`select action, details from agent_memory.admin_log
+      where action = 'delete_thread' and target = ${t1}`;
+    assertEquals(log.length, 1);
+    assertEquals(log[0].details.scope, `team-${s}`);
+    const again = await cli('delete-thread', t1);
+    assertEquals(again.code, 1);
+    assertStringIncludes(again.err, `Thread ${t1} not found`);
+    assertEquals((await cli('delete-thread', 'not-a-uuid')).code, 1);
+
+    // restore-thread
+    const res = await cli('restore-thread', t1);
+    assertEquals(res.code, 0, res.err);
+    assertStringIncludes(res.out, `Restored thread ${t1}`);
+    assertEquals(await deletedAt(t1), false);
+    const notDeleted = await cli('restore-thread', t1);
+    assertEquals(notDeleted.code, 1);
+    assertStringIncludes(notDeleted.err, `Thread ${t1} not found or not deleted`);
+    await deleteThread(sql, t1);
+    await restoreThread(sql, t1);
+    await assertRejects(() => restoreThread(sql, t1), Error, `Thread ${t1} not found or not deleted`);
+    await assertRejects(() => deleteThread(sql, 'nope'), Error, 'Thread nope not found');
+
+    // erase-thread needs --yes, then hard-deletes with its posts
+    const dry = await cli('erase-thread', t2);
+    assertEquals(dry.code, 1);
+    assertStringIncludes(dry.out, t2);
+    assertStringIncludes(dry.out, `team-${s}`);
+    assertStringIncludes(dry.out, 'second');
+    assertStringIncludes(dry.out, '--yes');
+    assertEquals(await deletedAt(t2), false);
+    const done = await cli('erase-thread', t2, '--yes');
+    assertEquals(done.code, 0, done.err);
+    assertStringIncludes(done.out, `Erased thread ${t2}`);
+    assertEquals(await deletedAt(t2), undefined);
+    assertEquals((await sql`select 1 from agent_memory.thread_posts where thread_id = ${t2}`).length, 0);
+    const gone = await cli('erase-thread', t2, '--yes');
+    assertEquals(gone.code, 1);
+    assertStringIncludes(gone.err, `Thread ${t2} not found`);
+    assertEquals((await cli('erase-thread', 'not-a-uuid')).code, 1);
+    await eraseThread(sql, t1);
+    await assertRejects(() => eraseThread(sql, t1), Error, `Thread ${t1} not found`);
+    await sql`delete from agent_memory.admin_log where action = 'delete_thread' and target = any(${[t1, t2]}::text[])`;
+  }));

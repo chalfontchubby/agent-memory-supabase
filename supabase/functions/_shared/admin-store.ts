@@ -90,6 +90,12 @@ export class PgAdminStore {
     });
   }
 
+  deleteThread(id: string): Promise<void> {
+    return this.run(async (tx) => {
+      await tx`select agent_memory.admin_delete_thread(${id}::uuid)`;
+    });
+  }
+
   listMembers(): Promise<AdminMember[]> {
     return this.run(async (tx) => {
       const rows = await tx<Row[]>`select * from agent_memory.admin_list_members()`;

@@ -9,10 +9,41 @@ share one memory, and no one can read a scope they weren't granted.
 
 ## Tools
 
-The server exposes 11 tools, plus 12 `admin_` tools that only admins see (see [Admins](#admins)): `list_scopes`, `store`, `store_batch`, `search`, `recall`, `find_related`,
+The server exposes 22 tools, plus 13 `admin_` tools that only admins see (see [Admins](#admins)). Eleven are the
+thread tools (see [Threads and sessions](#threads-and-sessions)). The memory tools are `list_scopes`, `store`, `store_batch`, `search`, `recall`, `find_related`,
 `list_recent`, `update`, `delete`, `stats` and `prune`. They match the original server, plus a `scope` argument on the
 write tools. Search is hybrid (BM25 full-text plus `gte-small` vector similarity, fused with RRF) with temporal decay.
 Delete and prune are soft; rows are purged after 30 days.
+
+## Threads and sessions
+
+Memories hold what is known; **threads** hold the discussion around it. A thread lives in one scope, has a title and
+numbered posts, and can be linked to memories. Anyone with read access to the scope can read it; write access is
+needed to create, post, resolve, reopen or link. `recall` lists the threads linked to each memory it returns, so an
+agent that finds a memory also finds the conversation about it.
+
+The thread tools are `create_thread`, `post`, `read_thread`, `list_threads`, `resolve_thread`, `reopen_thread`,
+`link_memory`, `unlink_memory`, `subscribe`, `unsubscribe` and `whats_new`.
+
+A **session** is one running agent: a conversation or job, even when several agents share a token. The first call that
+needs one (`create_thread`, `post`, `resolve_thread`, `reopen_thread`, `subscribe`) creates it and returns its id;
+pass that id as `session` on later calls. If the id is lost, pass the same `session_label` to pick the session up
+again. A session is how the server tells your own posts from other agents' posts, and it is recorded on the memories
+you store and update.
+
+The `whats_new` loop: subscribe your session to the threads you care about (creating or posting to a thread
+subscribes you), call `whats_new` with your session when you resume work and between steps of long work, then
+`read_thread` with the session to read the posts you have not seen. Reading marks them seen. Your own posts never
+show as new.
+
+Admins can delete a thread with `admin_delete_thread`. From the shell:
+
+```sh
+deno run -A scripts/admin.ts delete-thread <thread-id>          # soft delete, recoverable for 30 days
+deno run -A scripts/admin.ts restore-thread <thread-id>
+deno run -A scripts/admin.ts erase-thread <thread-id>           # shows scope and title, exits 1
+deno run -A scripts/admin.ts erase-thread <thread-id> --yes     # hard delete with its posts; not reversible
+```
 
 ## Quick start
 
@@ -167,11 +198,13 @@ deno run -A scripts/backup.ts backup --scope my-team --out backup-my-team.json  
 deno run -A scripts/backup.ts restore-backup backup-<timestamp>.json
 ```
 
-`backup` exports the whole install by default; `--scope` limits it to one scope (and the members it references). The
+`backup` exports the whole install by default, including threads, posts, links, sessions and subscriptions; `--scope`
+limits it to one scope: that scope's threads and posts, the links to memories in the file, the sessions they reference,
+and the members behind all of it. The
 file holds memory content: treat it as private. `restore-backup` loads only into an **empty** install (fresh
 migrations, no scopes, members or memories) and keeps ids. Access tokens are never exported, so after a restore,
 issue new tokens with `issue-token`. Admin flags and deactivation are kept, and backup files written before admin
-support still restore (as non-admin, active members). The admin log is **not** exported, so it starts empty after a restore.
+support, or before threads, still restore (as non-admin, active members, with no threads). The admin log is **not** exported, so it starts empty after a restore.
 
 ### Import from a local agent-memory-mcp store
 
@@ -231,6 +264,10 @@ Keep the token in an environment variable, not in a committed file.
 
 ### Suggested CLAUDE.md wording
 
+[docs/claude-md-sample.md](docs/claude-md-sample.md) is a fuller section to paste into your own `CLAUDE.md` as it
+is, filling in the scope table. It covers scopes, keeping work status true, and when and how to use threads and
+sessions. The short version:
+
 ```markdown
 ## Shared memory
 - Call `list_scopes` first to see which scopes you can use and whether each is read or write.
@@ -247,9 +284,11 @@ AGENT_MEMORY_TOKEN=amm_… \
   deno run -A scripts/smoke.ts --scope <scope-with-write-access>
 ```
 
-It runs every tool once through the real endpoint, then three concurrent searches, prints `PASS` or `FAIL` per tool and
-exits non-zero on any failure. It deletes what it stored. An admin token sees the 12 `admin_` tools as well; the smoke
-test only checks that they are present, and does not exercise them.
+It runs every tool once through the real endpoint (including a thread created, posted to, read, recalled, followed
+with `whats_new` and resolved), then three concurrent searches, prints `PASS` or `FAIL` per tool and
+exits non-zero on any failure. It deletes what it stored. An admin token sees the 13 `admin_` tools as well; the smoke
+test checks that they are present and uses only `admin_delete_thread`, to remove its thread. With a non-admin token the
+thread is left resolved and the smoke test prints its id.
 
 ## Development
 

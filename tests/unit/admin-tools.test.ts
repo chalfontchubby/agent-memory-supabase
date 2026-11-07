@@ -9,6 +9,7 @@ const NAMES = [
   'admin_create_scope',
   'admin_deactivate_member',
   'admin_delete_scope',
+  'admin_delete_thread',
   'admin_grant',
   'admin_issue_token',
   'admin_list_grants',
@@ -38,6 +39,7 @@ function setup(fail?: Error) {
     listScopes: () => rec('listScopes').then(() => [{ name: 's' }]),
     createScope: (...a: unknown[]) => rec('createScope', ...a).then(() => ({ id: 'x' })),
     deleteScope: (...a: unknown[]) => rec('deleteScope', ...a),
+    deleteThread: (...a: unknown[]) => rec('deleteThread', ...a),
     listMembers: () => rec('listMembers').then(() => []),
     createMember: (...a: unknown[]) => rec('createMember', ...a).then(() => ({ id: 'x' })),
     deactivateMember: (...a: unknown[]) => rec('deactivateMember', ...a),
@@ -54,7 +56,7 @@ function setup(fail?: Error) {
   return { reg, calls };
 }
 
-Deno.test('registerAdminTools registers exactly the 12 admin tools, each described as Admin:', () => {
+Deno.test('registerAdminTools registers exactly the 13 admin tools, each described as Admin:', () => {
   const { reg } = setup();
   assertEquals(Object.keys(reg).sort(), NAMES);
   for (const n of NAMES) assert(reg[n].description?.startsWith('Admin:'), `${n} description`);
@@ -135,4 +137,16 @@ Deno.test('admin_create_member rejects blank or padded names and accepts a clean
   for (const good of ['alice', 'a', 'alice smith']) {
     assertEquals(schema.safeParse({ name: good }).success, true, good);
   }
+});
+
+Deno.test('admin_delete_thread is registered and calls deleteThread', async () => {
+  const { reg, calls } = setup();
+  const id = '11111111-1111-4111-8111-111111111111';
+  const r = await reg.admin_delete_thread.handler({ thread_id: id }, {});
+  assertEquals(calls.deleteThread, [[id]]);
+  assertEquals(JSON.parse(r.content[0].text), { deleted: id });
+  const bad = await reg.admin_delete_thread.handler({ thread_id: 'x' }, {});
+  assertEquals(bad.isError, true);
+  assertEquals(bad.content[0].text, 'Thread x not found');
+  assertEquals(calls.deleteThread.length, 1);
 });
