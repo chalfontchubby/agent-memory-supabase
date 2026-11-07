@@ -1,8 +1,6 @@
 import type { Sql } from '../../supabase/functions/_shared/db.ts';
 import { generateToken, hashToken } from '../../supabase/functions/_shared/tokens.ts';
 
-const SCOPE_NAME = /^[a-z0-9][a-z0-9-]{0,62}$/;
-
 export interface Scope {
   id: string;
   name: string;
@@ -47,17 +45,20 @@ async function memberId(sql: Sql, name: string): Promise<string> {
   return r.id;
 }
 
-export async function createScope(sql: Sql, name: string, description?: string): Promise<Scope> {
-  if (!SCOPE_NAME.test(name)) {
-    throw new Error(
-      `Invalid scope name '${name}': use 1-63 characters, lowercase letters, digits and hyphens, starting with a letter or digit.`,
-    );
+/** Run an adm_* call. Their P0001 errors are user-safe: rethrow the message alone, never driver detail. */
+async function adm<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (e) {
+    const err = e as { code?: string; message?: string };
+    if (err.code === 'P0001') throw new Error(err.message);
+    throw e;
   }
-  const [dup] = await sql`select 1 from agent_memory.scopes where name = ${name}`;
-  if (dup) throw new Error(`Scope '${name}' already exists`);
-  const [r] = await sql`
-    insert into agent_memory.scopes (name, description) values (${name}, ${description ?? null})
-    returning id, name, description`;
+}
+
+export async function createScope(sql: Sql, name: string, description?: string): Promise<Scope> {
+  await adm(() => sql`select agent_memory.adm_create_scope(${name}, ${description ?? null}, null, ${grantor()})`);
+  const [r] = await sql`select id, name, description from agent_memory.scopes where name = ${name}`;
   return r as Scope;
 }
 
@@ -72,37 +73,78 @@ export async function createMember(
 ): Promise<Member> {
   // Email is optional: it is only used to link the member to a Supabase login (auth.users).
   const email = opts.email?.trim() || null;
-  const [dup] = await sql`select 1 from agent_memory.members where display_name = ${name}`;
-  if (dup) throw new Error(`Member '${name}' already exists`);
-  let authUserId: string | null = null;
-  if (email) {
-    // Read-only lookup; nothing is ever written to auth.
-    const [u] = await sql`select id from auth.users where lower(email) = lower(${email})`;
-    authUserId = u?.id ?? null;
-  }
+  await adm(() => sql`select agent_memory.adm_create_member(${name}, ${opts.kind}, ${email}, null, ${grantor()})`);
   const [r] = await sql`
-    insert into agent_memory.members (display_name, kind, email, auth_user_id)
-    values (${name}, ${opts.kind}, ${email}, ${authUserId})
-    returning id, display_name as name, kind, auth_user_id as "authUserId"`;
+    select id, display_name as name, kind, auth_user_id as "authUserId"
+    from agent_memory.members where display_name = ${name}`;
   return r as Member;
 }
 
 export async function grant(sql: Sql, member: string, scope: string, access: 'read' | 'write'): Promise<void> {
-  if (access !== 'read' && access !== 'write') throw new Error(`Access must be read or write, got '${access}'`);
-  const m = await memberId(sql, member);
-  const s = await scopeId(sql, scope);
-  await sql`
-    insert into agent_memory.scope_grants (scope_id, member_id, access, granted_by)
-    values (${s}, ${m}, ${access}, ${grantor()})
-    on conflict (scope_id, member_id)
-    do update set access = excluded.access, granted_by = excluded.granted_by, granted_at = now()`;
+  await adm(() => sql`select agent_memory.adm_grant(${member}, ${scope}, ${access}, null, ${grantor()})`);
 }
 
 export async function revoke(sql: Sql, member: string, scope: string): Promise<boolean> {
-  const m = await memberId(sql, member);
-  const s = await scopeId(sql, scope);
-  const r = await sql`delete from agent_memory.scope_grants where scope_id = ${s} and member_id = ${m}`;
-  return r.count > 0;
+  const [r] = await adm(() => sql`select agent_memory.adm_revoke(${member}, ${scope}, null, ${grantor()}) as ok`);
+  return r.ok as boolean;
+}
+
+export async function deleteScope(sql: Sql, name: string): Promise<void> {
+  await adm(() => sql`select agent_memory.adm_delete_scope(${name}, null, ${grantor()})`);
+}
+
+export async function deactivateMember(sql: Sql, name: string): Promise<void> {
+  await adm(() => sql`select agent_memory.adm_deactivate_member(${name}, null, ${grantor()})`);
+}
+
+export async function reactivateMember(sql: Sql, name: string): Promise<void> {
+  await adm(() => sql`select agent_memory.adm_reactivate_member(${name}, null, ${grantor()})`);
+}
+
+export async function setAdmin(sql: Sql, name: string, on: boolean): Promise<void> {
+  await adm(() => sql`select agent_memory.adm_set_admin(${name}, ${on}, null, ${grantor()})`);
+}
+
+export interface MemberRow {
+  name: string;
+  kind: 'human' | 'bot';
+  email: string | null;
+  is_admin: boolean;
+  deactivated: boolean;
+  live_tokens: number;
+}
+
+export async function listMembers(sql: Sql): Promise<MemberRow[]> {
+  return await sql<MemberRow[]>`
+    select m.display_name as name, m.kind, m.email, m.is_admin,
+           (m.deactivated_at is not null) as deactivated,
+           (select count(*)::int from agent_memory.access_tokens t
+             where t.member_id = m.id and t.revoked_at is null
+               and (t.expires_at is null or t.expires_at > now())) as live_tokens
+    from agent_memory.members m order by m.display_name`;
+}
+
+export interface AdminLogRow {
+  at: Date;
+  actor: string;
+  action: string;
+  target: string;
+  details: unknown;
+}
+
+/** Admin log, newest first. `actor` matches the member's display name or the recorded label. */
+export async function adminLog(
+  sql: Sql,
+  f: { since?: Date; actor?: string; limit?: number } = {},
+): Promise<AdminLogRow[]> {
+  return await sql<AdminLogRow[]>`
+    select l.at, coalesce(m.display_name, l.actor_label) as actor, l.action, l.target, l.details
+    from agent_memory.admin_log l
+    left join agent_memory.members m on m.id = l.actor_member_id
+    where ${f.since === undefined ? sql`true` : sql`l.at >= ${f.since}`}
+      and ${f.actor === undefined ? sql`true` : sql`coalesce(m.display_name, l.actor_label) = ${f.actor}`}
+    order by l.at desc, l.id desc
+    limit ${f.limit ?? 50}`;
 }
 
 export async function listGrants(sql: Sql): Promise<GrantRow[]> {
@@ -126,11 +168,11 @@ export function parseExpires(input: string, now: Date = new Date()): Date {
 
 /** Returns the plaintext token. It is not recoverable afterwards: only the hash is stored. */
 export async function issueToken(sql: Sql, member: string, name: string, expires?: Date): Promise<string> {
-  const m = await memberId(sql, member);
   const token = generateToken();
-  await sql`
-    insert into agent_memory.access_tokens (member_id, name, token_hash, expires_at)
-    values (${m}, ${name}, ${await hashToken(token)}, ${expires ?? null})`;
+  const hash = await hashToken(token);
+  await adm(() =>
+    sql`select agent_memory.adm_issue_token(${member}, ${name}, ${hash}, ${expires ?? null}, null, ${grantor()})`
+  );
   return token;
 }
 
@@ -143,10 +185,8 @@ export async function listTokens(sql: Sql, member: string): Promise<TokenRow[]> 
 }
 
 export async function revokeToken(sql: Sql, id: string): Promise<void> {
-  const r = await sql`
-    update agent_memory.access_tokens set revoked_at = now()
-    where id::text = ${id} and revoked_at is null`;
-  if (r.count === 0) throw new Error(`Token '${id}' not found or already revoked`);
+  if (!UUID.test(id)) throw new Error(`Token '${id}' not found or already revoked`);
+  await adm(() => sql`select agent_memory.adm_revoke_token(${id}::uuid, null, ${grantor()})`);
 }
 
 export async function restoreMemory(sql: Sql, id: string): Promise<void> {

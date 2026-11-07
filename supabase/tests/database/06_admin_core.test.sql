@@ -2,6 +2,9 @@ begin;
 create extension if not exists pgtap with schema extensions;
 select plan(51);
 
+-- Count only this file's log rows: integration runs leave rows in the shared local database (rolled back below).
+delete from agent_memory.admin_log;
+
 -- schema
 select has_column('agent_memory'::name, 'members'::name, 'is_admin'::name, 'members.is_admin exists');
 select has_column('agent_memory'::name, 'members'::name, 'deactivated_at'::name, 'members.deactivated_at exists');

@@ -1,28 +1,40 @@
 import { parseArgs } from 'jsr:@std/cli@1.0.9/parse-args';
 import { connect } from '../supabase/functions/_shared/db.ts';
 import {
+  adminLog,
   createMember,
   createScope,
+  deactivateMember,
   type DeletedFilter,
   type DeletedRow,
+  deleteScope,
   eraseMemory,
   grant,
   issueToken,
   listDeleted,
   listGrants,
+  listMembers,
   listScopes,
   listTokens,
   memorySummary,
   parseExpires,
+  reactivateMember,
   restoreMemories,
   revoke,
   revokeToken,
+  setAdmin,
 } from './lib/admin-db.ts';
 
 const USAGE = `Usage: deno run -A scripts/admin.ts <command> ...
   create-scope <name> [--description <text>]
   list-scopes
+  delete-scope <name>                (refused while any memory, live or deleted, remains)
   create-member <name> [--email <address>] | --bot   (email optional; links a Supabase login)
+  list-members
+  deactivate <member>                (revokes tokens and grants, drops admin)
+  reactivate <member>                (not admin again until set-admin)
+  set-admin <member> on|off
+  admin-log [--since <ISO date | Nd>] [--actor <name>] [--limit N]   (default limit 50)
   grant <member> <scope> read|write
   revoke <member> <scope>
   list-grants
@@ -50,7 +62,7 @@ const DELETED_COLS: (keyof DeletedRow & string)[] = ['id', 'scope', 'deletedAt',
 /** Returns the process exit code. */
 async function main(): Promise<number> {
   const args = parseArgs(Deno.args, {
-    string: ['description', 'human', 'email', 'expires', 'scope', 'by', 'since'],
+    string: ['description', 'human', 'email', 'expires', 'scope', 'by', 'since', 'actor', 'limit'],
     boolean: ['bot', 'yes'],
   });
   const [cmd, ...p] = args._.map(String);
@@ -79,6 +91,60 @@ async function main(): Promise<number> {
       case 'list-scopes':
         console.log(table(await listScopes(sql), ['name', 'description']));
         break;
+      case 'delete-scope':
+        need(1, 'delete-scope <name>');
+        await deleteScope(sql, p[0]);
+        console.log(`Deleted scope '${p[0]}'`);
+        break;
+      case 'list-members':
+        need(0, 'list-members');
+        console.log(table(await listMembers(sql), ['name', 'kind', 'email', 'is_admin', 'deactivated', 'live_tokens']));
+        break;
+      case 'deactivate':
+        need(1, 'deactivate <member>');
+        await deactivateMember(sql, p[0]);
+        console.log(`Deactivated '${p[0]}': tokens revoked, grants removed, admin dropped`);
+        break;
+      case 'reactivate':
+        need(1, 'reactivate <member>');
+        await reactivateMember(sql, p[0]);
+        console.log(`Reactivated '${p[0]}' (no grants or tokens restored; run set-admin to make them an admin)`);
+        break;
+      case 'set-admin': {
+        const usage = 'set-admin <member> on|off';
+        need(2, usage);
+        if (p[1] !== 'on' && p[1] !== 'off') throw new Error(`Usage: ${usage}`);
+        await setAdmin(sql, p[0], p[1] === 'on');
+        console.log(`'${p[0]}' is ${p[1] === 'on' ? 'now' : 'no longer'} an admin`);
+        break;
+      }
+      case 'admin-log': {
+        need(0, 'admin-log [--since <ISO date | Nd>] [--actor <name>] [--limit N]');
+        let limit = 50;
+        if (args.limit !== undefined) {
+          if (!/^\d+$/.test(args.limit) || Number(args.limit) < 1) {
+            throw new Error(`Invalid --limit '${args.limit}': use a positive whole number`);
+          }
+          limit = Number(args.limit);
+        }
+        let since: Date | undefined;
+        if (args.since !== undefined) {
+          const days = /^(\d+)d$/.exec(args.since);
+          const d = new Date(args.since);
+          if (days) since = new Date(Date.now() - Number(days[1]) * 86_400_000);
+          else if (/^\d{4}-\d{2}-\d{2}/.test(args.since) && !isNaN(d.getTime())) since = d;
+          else throw new Error(`Invalid --since '${args.since}': use an ISO date or a number of days (7d)`);
+        }
+        const rows = await adminLog(sql, { since, actor: args.actor, limit });
+        console.log(table(rows.map((r) => ({ ...r, details: JSON.stringify(r.details) })), [
+          'at',
+          'actor',
+          'action',
+          'target',
+          'details',
+        ]));
+        break;
+      }
       case 'create-member': {
         need(1, 'create-member <name> [--email <address>] | --bot');
         // --human <email> is the older spelling of --email and still works.

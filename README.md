@@ -100,6 +100,24 @@ deno run -A scripts/admin.ts issue-token alice laptop --expires 90d   # shown on
 Other commands: `list-scopes`, `list-grants`, `list-tokens <member>`, `revoke <member> <scope>` and
 `revoke-token <id>`. Tokens look like `amm_…` and only their SHA-256 hash is stored.
 
+### Admins
+
+Some members are admins. An admin can manage the team from Claude, not only from the shell.
+
+- **The first admin** comes from `scripts/setup.ts`: a human member it creates or reuses is made an admin (a `--bot`
+  member never is). For an existing install, run `deno run -A scripts/admin.ts set-admin <member> on`.
+- **Shell-only commands** (they are not available through Claude): `set-admin <member> on|off`,
+  `reactivate <member>` and `admin-log [--since <ISO|Nd>] [--actor <name>] [--limit N]`.
+  `delete-scope`, `deactivate` and `list-members` are also shell commands, and admins can do them from Claude too.
+  Deactivating a member also drops their admin flag, so a reactivated member is not an admin until `set-admin` is run.
+  A scope can only be deleted once it holds no memories, live or soft-deleted.
+- **From Claude**, admins can do the rest with the `admin_` tools: `admin_list_scopes`, `admin_create_scope`,
+  `admin_delete_scope`, `admin_list_members`, `admin_create_member`, `admin_deactivate_member`, `admin_list_grants`,
+  `admin_grant`, `admin_revoke`, `admin_issue_token`, `admin_list_tokens` and `admin_revoke_token`.
+- **Admin tools never act on another admin.** Changing an admin, or their grants or tokens, is done from the shell.
+
+Every admin action, from the shell or from Claude, is recorded in the admin log. The log never holds a token.
+
 ### Undo, and erasing for good
 
 `delete` and `prune` are soft: a deleted memory stays restorable for 30 days, then the daily job purges it. A purge

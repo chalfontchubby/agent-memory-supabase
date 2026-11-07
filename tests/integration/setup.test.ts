@@ -167,3 +167,29 @@ Deno.test('refuses to write when the env file is not git-ignored', async () => {
     assertEquals(c.cmds.length, 0);
   });
 });
+
+Deno.test('a human member becomes an admin, and re-running does not fail', async () => {
+  await withSetup(async (c) => {
+    const o = { ...c.opts(), member: `ann-${c.s}`, bot: false };
+    assertEquals(await setup(o), 0);
+    const sql = adminSql();
+    const admin = async () =>
+      (await sql`select is_admin from agent_memory.members where display_name = ${'ann-' + c.s}`)[0].is_admin;
+    assertEquals(await admin(), true);
+    assertStringIncludes(c.lines.join('\n'), `[6/7] Member 'ann-${c.s}' is an admin`);
+    assertEquals(await setup(o), 0);
+    assertEquals(await admin(), true);
+    await sql.end();
+  });
+});
+
+Deno.test('a bot member is never made admin and the note is printed', async () => {
+  await withSetup(async (c) => {
+    assertEquals(await setup(c.opts()), 0);
+    const sql = adminSql();
+    const [r] = await sql`select is_admin from agent_memory.members where display_name = ${'bot-' + c.s}`;
+    await sql.end();
+    assertEquals(r.is_admin, false);
+    assertStringIncludes(c.lines.join('\n'), 'Note: no admin yet - run admin.ts set-admin <human> on');
+  });
+});
