@@ -11,6 +11,39 @@ If you want to buy me a beer, then please use [Paypal](https://paypal.me/predbat
 [GitHub sponsor](https://github.com/springfall2008)
 ![image](https://github.com/springfall2008/batpred/assets/48591903/b3a533ef-0862-4e0b-b272-30e254f58467)
 
+## Why
+
+Agents forget everything between sessions. Most memory servers fix that for one person on one machine: a local file or
+database that a cloud session, a CI bot or a teammate cannot reach. This project is for a team of people and bots
+working on the same code, who should learn from each other: what one session finds, the next one can recall, wherever
+it runs.
+
+How it differs from other memory tools:
+
+- **Hosted, but yours.** Hosted memory services such as Mem0 Platform, Supermemory and Zep give a team shared memory,
+  but the memories live on their service, and finer access control is often a paid tier. Self-hosted servers such as
+  mcp-memory-service, Graphiti and Cognee keep the data with you, but you run the server and database and build the
+  team's access rules yourself. This runs in your own Supabase project (the free tier is enough), installs with two
+  commands, and has no server to look after. A client needs only a URL and a token, so a cloud session or a bot
+  connects as easily as a laptop.
+- **Access rules live in the database.** Each memory belongs to a scope, and each member has read or write access per
+  scope. Postgres row-level security enforces this, not application code, and the pgTAP and integration tests check it
+  against a real database. A bot that answers in public can read a scope without being able to write to it, and a
+  private scope is invisible to anyone not granted it.
+- **Threads, so agents can work together.** Memories hold what is settled; threads hold the discussion. An agent can
+  hand its findings to another, ask a question someone answers later, and catch up with `whats_new`. None of the
+  memory servers we compared has an equivalent.
+- **No LLM in the loop.** Memories are stored as the agent wrote them and found by hybrid full-text and vector search.
+  The embedding model (`gte-small`) runs inside the function. Tools such as Mem0, Graphiti and Cognee call an LLM to
+  extract facts or a graph from what you give them. Here there is no model API key, no per-call model cost, and
+  nothing rewrites what was stored.
+- **Run by a team, not one person.** Admins manage members, grants and tokens from Claude or the shell. Every admin
+  action is logged, deletes can be undone for 30 days, and one script backs up the whole install.
+
+It is not a knowledge graph, and it is not a personal assistant's memory. For one person on one machine, the
+[reference memory server](https://github.com/modelcontextprotocol/servers/tree/main/src/memory) or
+[agent-memory-mcp](https://github.com/adamrdrew/agent-memory-mcp), which this project builds on, is simpler.
+
 ## Tools
 
 The server exposes 22 tools, plus 13 `admin_` tools that only admins see (see [Admins](#admins)). Eleven are the
@@ -152,7 +185,8 @@ Some members are admins. An admin can manage the team from Claude, not only from
   A scope can only be deleted once it holds no memories, live or soft-deleted.
 - **From Claude**, admins can do the rest with the `admin_` tools: `admin_list_scopes`, `admin_create_scope`,
   `admin_delete_scope`, `admin_list_members`, `admin_create_member`, `admin_deactivate_member`, `admin_list_grants`,
-  `admin_grant`, `admin_revoke`, `admin_issue_token`, `admin_list_tokens` and `admin_revoke_token`.
+  `admin_grant`, `admin_revoke`, `admin_issue_token`, `admin_list_tokens`, `admin_revoke_token` and
+  `admin_delete_thread` (a soft delete; `restore-thread` and `erase-thread` are shell-only).
 - **Connecting an onboarded member.** The admin issues a token with `admin_issue_token` (or `issue-token`) and gives it
   to the member, who registers it with Claude Code:
 
