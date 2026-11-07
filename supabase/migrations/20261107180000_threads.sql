@@ -265,8 +265,8 @@ alter policy memories_insert on agent_memory.memories
     and (updated_session is null or agent_memory.owns_session(updated_session)));
 alter policy memories_update on agent_memory.memories
   with check (agent_memory.can_write(scope_id) and updated_by = agent_memory.current_member_id()
-    and (created_session is null or agent_memory.owns_session(created_session))
     and (updated_session is null or agent_memory.owns_session(updated_session)));
+-- No created_session check on update: it is not updatable and carries over from the creator's session.
 
 grant insert (created_session, updated_session) on agent_memory.memories to agent_memory_member;
 grant update (updated_session) on agent_memory.memories to agent_memory_member;

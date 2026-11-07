@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(34);
+select plan(36);
 
 -- Fixtures (as postgres): w writes s1 and s2, r reads s1, o has no grants.
 insert into agent_memory.scopes (id, name) values
@@ -9,18 +9,21 @@ insert into agent_memory.scopes (id, name) values
 insert into agent_memory.members (id, display_name, kind) values
   ('11111111-1111-1111-1111-111111111111', 'w', 'human'),
   ('22222222-2222-2222-2222-222222222222', 'r', 'human'),
-  ('33333333-3333-3333-3333-333333333333', 'o', 'human');
+  ('33333333-3333-3333-3333-333333333333', 'o', 'human'),
+  ('44444444-4444-4444-4444-444444444444', 'w2', 'human');
 insert into agent_memory.scope_grants (scope_id, member_id, access) values
   ('a1000000-0000-0000-0000-0000000000a1', '11111111-1111-1111-1111-111111111111', 'write'),
   ('a2000000-0000-0000-0000-0000000000a2', '11111111-1111-1111-1111-111111111111', 'write'),
-  ('a1000000-0000-0000-0000-0000000000a1', '22222222-2222-2222-2222-222222222222', 'read');
+  ('a1000000-0000-0000-0000-0000000000a1', '22222222-2222-2222-2222-222222222222', 'read'),
+  ('a1000000-0000-0000-0000-0000000000a1', '44444444-4444-4444-4444-444444444444', 'write');
 insert into agent_memory.memories (id, scope_id, content, category, created_by, updated_by, embedding) values
   ('aaaaaaaa-0000-0000-0000-000000000002', 'a2000000-0000-0000-0000-0000000000a2', 's2 mem', 'other',
    '11111111-1111-1111-1111-111111111111', '11111111-1111-1111-1111-111111111111',
    array_fill(0.1::real, array[384])::extensions.vector);
 insert into agent_memory.agent_sessions (id, member_id, label) values
   ('51111111-0000-0000-0000-000000000001', '11111111-1111-1111-1111-111111111111', 'wlabel'),
-  ('52222222-0000-0000-0000-000000000001', '22222222-2222-2222-2222-222222222222', 'rlabel');
+  ('52222222-0000-0000-0000-000000000001', '22222222-2222-2222-2222-222222222222', 'rlabel'),
+  ('54444444-0000-0000-0000-000000000001', '44444444-4444-4444-4444-444444444444', 'w2label');
 insert into agent_memory.threads (id, scope_id, title, created_by) values
   ('7a000000-0000-0000-0000-000000000001', 'a1000000-0000-0000-0000-0000000000a1', 'T1',
    '11111111-1111-1111-1111-111111111111');
@@ -94,6 +97,17 @@ select is((select created_session_label from agent_memory.memory_view where cont
 reset role;
 select is((select session_id from agent_memory.memory_history where memory_id = (select id from agent_memory.memories where content = 'with session')),
   '51111111-0000-0000-0000-000000000001'::uuid, 'history session_id records created_session');
+
+-- w2: a second writer can update a memory created in another member's session
+select set_config('agent_memory.member_id', '44444444-4444-4444-4444-444444444444', true);
+set local role agent_memory_member;
+with u as (update agent_memory.memories set content = 'edited by w2', updated_by = '44444444-4444-4444-4444-444444444444',
+           updated_session = null where content = 'with session' returning 1)
+select is((select count(*) from u), 1::bigint, 'second writer updates memory created in another member''s session');
+with u as (update agent_memory.memories set content = 'edited again', updated_by = '44444444-4444-4444-4444-444444444444',
+           updated_session = '54444444-0000-0000-0000-000000000001' where content = 'edited by w2' returning 1)
+select is((select count(*) from u), 1::bigint, 'second writer updates with their own updated_session');
+reset role;
 
 -- r
 select set_config('agent_memory.member_id', '22222222-2222-2222-2222-222222222222', true);
