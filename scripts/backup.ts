@@ -9,8 +9,15 @@ export interface Backup {
   format: typeof BACKUP_FORMAT;
   version: typeof BACKUP_VERSION;
   exportedAt: string;
-  scopes: { name: string; description: string | null; createdAt: string }[];
-  members: { id: string; displayName: string; kind: string; email: string | null }[];
+  scopes: { id: string; name: string; description: string | null; createdAt: string }[];
+  members: {
+    id: string;
+    displayName: string;
+    kind: string;
+    email: string | null;
+    authUserId: string | null;
+    createdAt: string;
+  }[];
   grants: { scope: string; member: string; access: string; grantedAt: string; grantedBy: string | null }[];
   memories: {
     id: string;
@@ -39,9 +46,14 @@ Access token hashes are never exported.`;
 const TS = (col: string) => `to_char(${col} at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
 
 /** Read everything except token hashes. With `scope`, only that scope's memories and grants (and the members they reference). */
-export async function exportBackup(sql: Sql, scope?: string): Promise<Backup> {
+export function exportBackup(sql: Sql, scope?: string): Promise<Backup> {
+  // One repeatable-read snapshot, so a backup taken while writers are active is point-in-time consistent.
+  return sql.begin('isolation level repeatable read read only', (tx) => exportSnapshot(tx, scope)) as Promise<Backup>;
+}
+
+async function exportSnapshot(sql: Sql, scope?: string): Promise<Backup> {
   const scopeRows = await sql`
-    select name, description, ${sql.unsafe(TS('created_at'))} as "createdAt"
+    select id, name, description, ${sql.unsafe(TS('created_at'))} as "createdAt"
     from agent_memory.scopes where ${scope === undefined ? sql`true` : sql`name = ${scope}`} order by name`;
   if (scope !== undefined && scopeRows.length === 0) throw new Error(`Scope '${scope}' not found`);
   const names = scopeRows.map((s) => s.name as string);
@@ -73,7 +85,9 @@ export async function exportBackup(sql: Sql, scope?: string): Promise<Backup> {
     if (m.updatedBy) wanted.add(m.updatedBy);
   }
   const members = await sql`
-    select id, display_name as "displayName", kind, email from agent_memory.members
+    select id, display_name as "displayName", kind, email, auth_user_id as "authUserId",
+           ${sql.unsafe(TS('created_at'))} as "createdAt"
+    from agent_memory.members
     where ${scope === undefined ? sql`true` : sql`display_name = any(${[...wanted]}::text[])`}
     order by display_name`;
 
@@ -105,14 +119,14 @@ export async function restoreBackup(sql: Sql, data: Backup): Promise<void> {
     for (const m of data.members) {
       memberIds.set(m.displayName, m.id);
       await tx`
-        insert into agent_memory.members (id, display_name, kind, email)
-        values (${m.id}, ${m.displayName}, ${m.kind}, ${m.email})`;
+        insert into agent_memory.members (id, display_name, kind, email, auth_user_id, created_at)
+        values (${m.id}, ${m.displayName}, ${m.kind}, ${m.email}, ${m.authUserId}, (${m.createdAt}::text)::timestamptz)`;
     }
     const scopeIds = new Map<string, string>();
     for (const s of data.scopes) {
       const [r] = await tx`
-        insert into agent_memory.scopes (name, description, created_at)
-        values (${s.name}, ${s.description}, (${s.createdAt}::text)::timestamptz) returning id`;
+        insert into agent_memory.scopes (id, name, description, created_at)
+        values (${s.id}, ${s.name}, ${s.description}, (${s.createdAt}::text)::timestamptz) returning id`;
       scopeIds.set(s.name, r.id);
     }
     const memberId = (name: string | null) => {
@@ -169,7 +183,12 @@ async function main(): Promise<void> {
     if (cmd === 'backup') {
       const data = await exportBackup(sql, args.scope);
       const out = args.out ?? `backup-${stamp()}.json`;
-      await Deno.writeTextFile(out, JSON.stringify(data, null, 2) + '\n');
+      try {
+        await Deno.writeTextFile(out, JSON.stringify(data, null, 2) + '\n', { createNew: true, mode: 0o600 });
+      } catch (e) {
+        if (e instanceof Deno.errors.AlreadyExists) throw new Error(`${out} already exists`);
+        throw e;
+      }
       console.log(
         `Wrote ${out}: ${data.scopes.length} scopes, ${data.members.length} members, ` +
           `${data.grants.length} grants, ${data.memories.length} memories`,
