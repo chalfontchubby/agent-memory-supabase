@@ -1,0 +1,26 @@
+ping (cold?)                 http=200 roundtrip=575ms {"worker":{"served":1,"msSinceBoot":3}}
+embed short #1 (model load)  http=200 roundtrip=131ms {"worker":{"served":2,"msSinceBoot":44},"action":"embed","n":1,"parallel":false,"dims":384,"perEmbedMs":[92.8],"totalMs":92.9}
+embed short #2               http=200 roundtrip=135ms {"worker":{"served":3,"msSinceBoot":179},"action":"embed","n":1,"parallel":false,"dims":384,"perEmbedMs":[92.3],"totalMs":92.3}
+embed short #3               http=200 roundtrip=134ms {"worker":{"served":4,"msSinceBoot":312},"action":"embed","n":1,"parallel":false,"dims":384,"perEmbedMs":[93],"totalMs":93}
+embed short #4               http=200 roundtrip=131ms {"worker":{"served":5,"msSinceBoot":445},"action":"embed","n":1,"parallel":false,"dims":384,"perEmbedMs":[92.5],"totalMs":92.5}
+embed medium #1              http=200 roundtrip=349ms {"worker":{"served":6,"msSinceBoot":578},"action":"embed","n":1,"parallel":false,"dims":384,"perEmbedMs":[307.3],"totalMs":307.3}
+embed medium #2              http=200 roundtrip=352ms {"worker":{"served":7,"msSinceBoot":931},"action":"embed","n":1,"parallel":false,"dims":384,"perEmbedMs":[306.7],"totalMs":306.7}
+embed medium #3              http=200 roundtrip=350ms {"worker":{"served":8,"msSinceBoot":1282},"action":"embed","n":1,"parallel":false,"dims":384,"perEmbedMs":[305.5],"totalMs":305.6}
+embed long #1                http=200 roundtrip=890ms {"worker":{"served":1,"msSinceBoot":5},"action":"embed","n":1,"parallel":false,"dims":384,"perEmbedMs":[784.3],"totalMs":784.4}
+embed long #2                http=200 roundtrip=524ms {"worker":{"served":1,"msSinceBoot":3},"action":"embed","n":1,"parallel":false,"dims":384,"perEmbedMs":[456.8],"totalMs":456.8}
+embed long #3                http=200 roundtrip=488ms {"worker":{"served":2,"msSinceBoot":494},"action":"embed","n":1,"parallel":false,"dims":384,"perEmbedMs":[454.2],"totalMs":454.2}
+seq medium x2                http=200 roundtrip=656ms {"worker":{"served":3,"msSinceBoot":985},"action":"embed","n":2,"parallel":false,"dims":384,"perEmbedMs":[311.3,308.5],"totalMs":619.9}
+seq medium x4                http=200 roundtrip=1294ms {"worker":{"served":1,"msSinceBoot":3},"action":"embed","n":4,"parallel":false,"dims":384,"perEmbedMs":[305.3,304.9,309.2,303.6],"totalMs":1223.1}
+seq medium x8                http=546 roundtrip=1662ms {"code":"WORKER_RESOURCE_LIMIT","message":"Function failed due to not having enough compute resources (please check logs)"}
+seq medium x16               http=546 roundtrip=2210ms {"code":"WORKER_RESOURCE_LIMIT","message":"Function failed due to not having enough compute resources (please check logs)"}
+seq medium x24               http=546 roundtrip=2241ms {"code":"WORKER_RESOURCE_LIMIT","message":"Function failed due to not having enough compute resources (please check logs)"}
+seq medium x32               http=546 roundtrip=2247ms {"code":"WORKER_RESOURCE_LIMIT","message":"Function failed due to not having enough compute resources (please check logs)"}
+parallel medium x4           http=200 roundtrip=509ms {"worker":{"served":1,"msSinceBoot":3},"action":"embed","n":4,"parallel":true,"dims":384,"perEmbedMs":[408.2],"totalMs":408.2}
+parallel medium x8           http=546 roundtrip=612ms {"code":"WORKER_RESOURCE_LIMIT","message":"Function failed due to not having enough compute resources (please check logs)"}
+seq short x4                 http=200 roundtrip=810ms {"worker":{"served":1,"msSinceBoot":5},"action":"embed","n":4,"parallel":false,"dims":384,"perEmbedMs":[162.8,187.5,163.8,157.9],"totalMs":672.1}
+seq short x8                 http=200 roundtrip=812ms {"worker":{"served":1,"msSinceBoot":4},"action":"embed","n":8,"parallel":false,"dims":384,"perEmbedMs":[92.5,92.6,92.3,91.8,91.5,91.7,92.4,92.1],"totalMs":737}
+search "battery charge win"  http=200 roundtrip=391ms {"worker":{"served":2,"msSinceBoot":777},"action":"search","embedMs":93.7,"dbMs":261.3,"totalMs":355,"hits":10}
+search "octopus tariff exp"  http=200 roundtrip=153ms {"worker":{"served":3,"msSinceBoot":1168},"action":"search","embedMs":92.2,"dbMs":25.3,"totalMs":117.5,"hits":10}
+search "how do I debug the"  http=200 roundtrip=155ms {"worker":{"served":4,"msSinceBoot":1322},"action":"search","embedMs":91.7,"dbMs":28,"totalMs":119.6,"hits":10}
+search "battery charge win"  http=200 roundtrip=391ms {"worker":{"served":1,"msSinceBoot":3},"action":"search","embedMs":93.5,"dbMs":231.6,"totalMs":325.1,"hits":10}
+search "solar forecast"      http=200 roundtrip=506ms {"worker":{"served":1,"msSinceBoot":5},"action":"search","embedMs":165.4,"dbMs":243.6,"totalMs":409,"hits":10}

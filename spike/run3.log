@@ -1,0 +1,4 @@
+concurrent 3 x medium store-embed    200/s2 200/s1 200/s1
+concurrent 5 x medium store-embed    200/s2 200/s2 200/s2 200/s3 200/s1
+concurrent 5 x search                200/s1 200/s1 200/s2 200/s1 200/s2
+concurrent 10 x search               200/s2 200/s2 200/s4 200/s3 200/s3 200/s5 200/s4 200/s3 200/s5 200/s3
