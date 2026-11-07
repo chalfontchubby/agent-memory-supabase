@@ -32,8 +32,8 @@ async function snapshotRows() {
     from agent_memory.memories order by id`;
   const grants = await sql`select scope_id, member_id, access, granted_at::text, granted_by
     from agent_memory.scope_grants order by member_id`;
-  const members =
-    await sql`select id, display_name, kind, email, auth_user_id, created_at::text from agent_memory.members order by id`;
+  const members = await sql`select id, display_name, kind, email, auth_user_id, created_at::text,
+      is_admin, deactivated_at::text from agent_memory.members order by id`;
   const scopes = await sql`select id, description, created_at::text, name from agent_memory.scopes order by name`;
   return { mem, grants, members, scopes };
 }
@@ -52,6 +52,9 @@ Deno.test('backup and restore-backup round trip', async () => {
       values ('bk-ann', 'human', 'ann@example.test', gen_random_uuid()) returning id`;
     const [bot] =
       await sql`insert into agent_memory.members (display_name, kind) values ('bk-bot', 'bot') returning id`;
+    await sql`insert into agent_memory.members (display_name, kind, is_admin) values ('bk-root', 'human', true)`;
+    await sql`insert into agent_memory.members (display_name, kind, deactivated_at)
+      values ('bk-gone', 'human', '2026-01-02 03:04:05.678901+00')`;
     await sql`insert into agent_memory.scope_grants (scope_id, member_id, access, granted_by)
       values (${a.id}, ${ann.id}, 'write', 'tester'), (${b.id}, ${bot.id}, 'read', 'tester')`;
     const mk = async (scope: string, content: string, seed: number, by: string, extra = sql`null`) => {
@@ -84,6 +87,13 @@ Deno.test('backup and restore-backup round trip', async () => {
     assertEquals(data.format, 'agent-memory-supabase-backup');
     assertEquals(data.version, 1);
     assertEquals(data.memories.length, 3);
+    const bkRoot = data.members.find((m: { displayName: string }) => m.displayName === 'bk-root');
+    assertEquals(bkRoot.isAdmin, true);
+    assertEquals(bkRoot.deactivatedAt, null);
+    assertEquals(
+      data.members.find((m: { displayName: string }) => m.displayName === 'bk-gone').deactivatedAt,
+      '2026-01-02T03:04:05.678901Z',
+    );
     assertEquals(data.memories.find((m: { id: string }) => m.id === dead).deletedAt !== null, true);
     assertEquals(data.memories.find((m: { id: string }) => m.id === live).deletedAt, null);
     assertEquals(data.memories.find((m: { id: string }) => m.id === live).createdBy, 'bk-ann');
@@ -110,7 +120,12 @@ Deno.test('backup and restore-backup round trip', async () => {
     const after = await snapshotRows();
     assertEquals(after.scopes.length, 2);
     assert(before.members.some((m) => m.auth_user_id !== null));
-    assertEquals(after.members, before.members); // incl. auth_user_id and created_at
+    assertEquals(after.members, before.members); // incl. auth_user_id, created_at, is_admin, deactivated_at
+    const flags = new Map(after.members.map((m) => [m.display_name, m]));
+    assertEquals(flags.get('bk-root')!.is_admin, true);
+    assertEquals(flags.get('bk-ann')!.is_admin, false);
+    assertEquals(flags.get('bk-gone')!.deactivated_at, '2026-01-02 03:04:05.678901+00');
+    assertEquals(flags.get('bk-root')!.deactivated_at, null);
     assertEquals(after.scopes, before.scopes); // ids preserved
     assertEquals(after.mem, before.mem); // includes embedding::text and microsecond timestamps
     assertEquals(after.grants, before.grants);
@@ -118,6 +133,22 @@ Deno.test('backup and restore-backup round trip', async () => {
     assertEquals(hist.length, 3);
     assert(hist.every((h) => h.action === 'insert' && h.member_id === null));
     assertEquals((await sql`select count(*)::int as n from agent_memory.access_tokens`)[0].n, 0);
+
+    // --- a version-1 file without the admin fields still loads (isAdmin false, deactivatedAt null)
+    await truncateAll();
+    const old = JSON.parse(text);
+    for (const m of old.members) {
+      delete m.isAdmin;
+      delete m.deactivatedAt;
+    }
+    await restoreBackup(sql, old);
+    assertEquals(
+      (await sql`select count(*)::int as n from agent_memory.members where is_admin or deactivated_at is not null`)[0]
+        .n,
+      0,
+    );
+    await truncateAll();
+    await restoreBackup(sql, data);
 
     // --- refuses into a non-empty install
     const r5 = await cli('restore-backup', full);
