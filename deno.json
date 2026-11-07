@@ -1,0 +1,17 @@
+{
+  "tasks": {
+    "check": "deno fmt --check && deno lint && deno check supabase/functions/**/*.ts scripts/*.ts tests/**/*.ts",
+    "test:unit": "deno test -A tests/unit",
+    "test:int": "deno test -A tests/integration",
+    "test:e2e": "deno test -A tests/e2e",
+    "test:db": "supabase test db"
+  },
+  "fmt": {
+    "lineWidth": 120,
+    "singleQuote": true,
+    "exclude": ["docs", "spike", "supabase/.temp", ".superpowers", ".remember", "README.md"]
+  },
+  "lint": {
+    "exclude": ["docs", "spike"]
+  }
+}

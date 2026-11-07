@@ -5,3 +5,6 @@ dist/
 **/supabase/.temp/
 **/supabase/.branches/
 .DS_Store
+memories*.json
+backup*.json
+ids*.txt
