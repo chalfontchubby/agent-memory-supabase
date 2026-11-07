@@ -115,3 +115,64 @@ export interface MemoryStore {
   stats(scopes?: string[]): Promise<MemoryStats>;
   prune(o: PruneOptions): Promise<PruneResult>;
 }
+
+export interface SessionRef {
+  session?: string;
+  sessionLabel?: string;
+}
+export interface SessionInfo {
+  id: string;
+  label: string | null;
+  created: boolean;
+}
+export type ThreadStatus = 'open' | 'resolved';
+export interface ThreadSummary {
+  id: string;
+  scope: string;
+  title: string;
+  status: ThreadStatus;
+  createdBy: string;
+  createdAt: string;
+  lastPostAt: string;
+  postCount: number;
+  lastAuthor: string | null;
+}
+export interface ThreadPost {
+  seq: number;
+  kind: 'post' | 'resolve' | 'reopen';
+  body: string;
+  author: string;
+  sessionLabel: string | null;
+  createdAt: string;
+  new?: boolean;
+}
+/** preview: first 200 characters of the memory. */
+export interface ThreadLink {
+  memoryId: string;
+  scope: string;
+  preview: string;
+}
+export interface ThreadView {
+  thread: ThreadSummary;
+  links: ThreadLink[];
+  posts: ThreadPost[];
+  hasOlder: boolean;
+  moreUnread?: boolean;
+  session?: SessionInfo;
+}
+export interface WhatsNewItem {
+  threadId: string;
+  title: string;
+  scope: string;
+  status: ThreadStatus;
+  newPosts: number;
+  lastPostAt: string;
+  lastAuthor: string | null;
+}
+export interface LinkedThread {
+  id: string;
+  title: string;
+  scope: string;
+  status: ThreadStatus;
+  lastPostAt: string;
+}

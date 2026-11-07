@@ -32,3 +32,9 @@ export function checkContent(content: string): void {
     throw new StoreError(`content too long (max ${MAX_CONTENT_CHARS} characters)`);
   }
 }
+
+/** Thread limits (mirrored by the SQL functions). */
+export const THREAD_TITLE_MAX = 200;
+export const THREAD_READ_DEFAULT = 20;
+export const THREAD_LINKS_MAX = 20;
+export const SESSION_LABEL_MAX = 64;
