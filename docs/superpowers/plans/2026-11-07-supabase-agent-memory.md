@@ -27,6 +27,11 @@ Reference implementation of the original (tool schemas, decay maths, tests): `~/
 
 - Public repo, GPL-3.0-or-later. **No secrets in the repo**: credentials only from env vars / the gitignored `.env`.
   No project ref, company, customer or personal names in committed files.
+- **Every database change is a migration file in `supabase/migrations/`.** Applying the migrations in order to an
+  empty database (`supabase db reset` locally, `supabase db push` remotely) must create the complete working
+  database, cron job included. No SQL is ever applied by hand, through the dashboard or by a script, to create or
+  change schema objects; a fix to an earlier migration that has been pushed is a new migration. Scripts only
+  read and write rows.
 - All database objects in schema `agent_memory`; **no triggers on `auth.users`**, no requirement that members exist
   in `auth.users`. Schema `agent_memory` is **never** added to `[api] schemas`; `anon` and `authenticated` get no
   privileges on it.
