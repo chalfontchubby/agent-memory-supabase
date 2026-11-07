@@ -32,8 +32,8 @@ grant select on agent_memory.memory_view to agent_memory_member;
 
 -- Contract: returns at most p_limit rows in every mode (each hybrid arm fetches p_limit, fused result is
 -- trimmed to p_limit); callers over-fetch for decay re-ranking.
--- hnsw.iterative_scan makes the HNSW index keep scanning until enough rows pass the RLS filter,
--- so a member with a small scope still gets a full page.
+-- Exact similarity on purpose: an ANN index post-filtered by RLS returns short pages and leaks result counts;
+-- exact scan is milliseconds at this size.
 create function agent_memory.search_memories(
   p_query text,
   p_embedding extensions.vector(384),
@@ -51,14 +51,17 @@ create function agent_memory.search_memories(
 )
 language plpgsql stable security invoker
 set search_path = ''
-set hnsw.iterative_scan = relaxed_order
+set client_min_messages = warning -- websearch_to_tsquery NOTICEs on stop-word-only queries
 as $$
 #variable_conflict use_column
 declare
   v_tsq tsquery;
 begin
-  if p_mode not in ('keyword', 'semantic', 'hybrid') then
+  if p_mode is null or p_mode not in ('keyword', 'semantic', 'hybrid') then
     raise exception 'invalid search mode: %', p_mode using errcode = '22023';
+  end if;
+  if p_limit is null or p_limit < 1 then
+    raise exception 'invalid limit: %', p_limit using errcode = '22023';
   end if;
   if p_mode <> 'keyword' and p_embedding is null then
     raise exception 'embedding required for % search', p_mode using errcode = '22023';
@@ -66,6 +69,9 @@ begin
   v_tsq := pg_catalog.websearch_to_tsquery('english', coalesce(p_query, ''));
 
   if p_mode = 'keyword' then
+    if pg_catalog.numnode(v_tsq) = 0 then
+      return;
+    end if;
     return query
     select v.id, v.scope_id, v.scope, v.content, v.category, v.tags, v.created_at, v.updated_at,
            v.created_by, v.updated_by, v.access_count, v.last_accessed_at, k.score
@@ -96,7 +102,7 @@ begin
         and (p_tags is null or m.tags && p_tags)
         and (p_after is null or m.created_at >= p_after)
         and (p_before is null or m.created_at <= p_before)
-      order by m.embedding operator(extensions.<=>) p_embedding
+      order by m.embedding operator(extensions.<=>) p_embedding, m.id
       limit p_limit
     ) s
     join agent_memory.memory_view v on v.id = s.id
@@ -107,7 +113,7 @@ begin
     with kw as (
       select m.id, pg_catalog.row_number() over (order by pg_catalog.ts_rank_cd(m.fts, v_tsq) desc, m.id) as rnk
       from agent_memory.memories m
-      where m.fts operator(pg_catalog.@@) v_tsq
+      where pg_catalog.numnode(v_tsq) > 0 and m.fts operator(pg_catalog.@@) v_tsq
         and (p_scope_ids is null or m.scope_id = any (p_scope_ids))
         and (p_category is null or m.category = p_category)
         and (p_tags is null or m.tags && p_tags)
@@ -150,7 +156,6 @@ returns table (
 )
 language plpgsql stable security invoker
 set search_path = ''
-set hnsw.iterative_scan = relaxed_order
 as $$
 #variable_conflict use_column
 declare
@@ -169,7 +174,7 @@ begin
     from agent_memory.memories m
     where m.id <> p_id
       and (p_scope_ids is null or m.scope_id = any (p_scope_ids))
-    order by m.embedding operator(extensions.<=>) v_emb
+    order by m.embedding operator(extensions.<=>) v_emb, m.id
     limit p_limit
   ) s
   join agent_memory.memory_view v on v.id = s.id

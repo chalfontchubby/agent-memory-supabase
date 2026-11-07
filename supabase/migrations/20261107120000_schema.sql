@@ -86,7 +86,6 @@ create table agent_memory.access_tokens (
 
 create index memories_fts_idx on agent_memory.memories using gin (fts);
 create index memories_tags_idx on agent_memory.memories using gin (tags);
-create index memories_embedding_idx on agent_memory.memories using hnsw (embedding extensions.vector_cosine_ops);
 create index memories_scope_created_idx on agent_memory.memories (scope_id, created_at desc) where deleted_at is null;
 create index memories_deleted_idx on agent_memory.memories (deleted_at) where deleted_at is not null;
 

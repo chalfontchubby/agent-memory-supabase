@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(32);
+select plan(40);
 
 -- one-hot vector at dim i, optionally with weight w at dim j
 create function pg_temp.v(i int, j int default 1, w real default 0) returns extensions.vector
@@ -56,9 +56,6 @@ select ok(not has_table_privilege('anon', 'agent_memory.memory_view', 'select'),
 -- rw
 select set_config('agent_memory.member_id', '11111111-1111-1111-1111-111111111111', true);
 set local role agent_memory_member;
--- Exact (non-HNSW) ordering for the ranking/filter assertions: the orthogonal fixtures plus 1000 near-duplicates
--- are a pathological graph for an approximate index. The index itself is exercised in the alpha-only section.
-set local enable_indexscan = off;
 
 select is((select created_by || '/' || updated_by || '/' || scope from agent_memory.memory_view where id = 'aaaaaaaa-0000-0000-0000-000000000001'),
   'rw/bw/alpha', 'view shows names and scope');
@@ -105,23 +102,36 @@ select lives_ok($$select * from agent_memory.search_memories('???', null, 'keywo
 select is((select count(*) from agent_memory.search_memories('???', null, 'keyword', null, null, null, null, null, 5)), 0::bigint, 'keyword with ??? returns 0 rows');
 select is((select count(*) from agent_memory.search_memories('the', null, 'keyword', null, null, null, null, null, 5)), 0::bigint, 'keyword with stop word returns 0 rows');
 
+-- Filters must apply inside each arm, before its LIMIT: p_limit is smaller than the matching readable count and the
+-- nearest unfiltered row is excluded by the filter.
+select is((select array_agg(id) from agent_memory.search_memories('zzzz', pg_temp.v(1), 'hybrid', null, 'learning', null, null, null, 1)),
+  array['aaaaaaaa-0000-0000-0000-000000000002']::uuid[], 'hybrid category filter applies before limit');
+select is((select array_agg(id) from agent_memory.search_memories('zzzz', pg_temp.v(1), 'hybrid', null, null, array['grid'], null, null, 1)),
+  array['aaaaaaaa-0000-0000-0000-000000000002']::uuid[], 'hybrid tags filter applies before limit');
+select is((select array_agg(id) from agent_memory.search_memories('zzzz', pg_temp.v(1), 'hybrid', null, null, null, '2026-02-01', '2026-02-28', 1)),
+  array['aaaaaaaa-0000-0000-0000-000000000002']::uuid[], 'hybrid after/before filters apply before limit');
+select is((select array_agg(id) from agent_memory.search_memories('charge', null, 'keyword', null, 'learning', null, null, null, 1)),
+  array['aaaaaaaa-0000-0000-0000-000000000002']::uuid[], 'keyword category filter applies before limit');
+select is((select array_agg(id) from agent_memory.search_memories('x', pg_temp.v(1), 'semantic', array['c0000000-0000-0000-0000-00000000000c']::uuid[], null, null, null, null, 1)),
+  array['cccccccc-0000-0000-0000-000000000004']::uuid[], 'semantic scope filter applies before limit');
+
+select throws_ok($$select * from agent_memory.search_memories('x', null, null, null, null, null, null, null, 5)$$, '22023', null, 'null mode raises 22023');
+select throws_ok($$select * from agent_memory.search_memories('x', null, 'keyword', null, null, null, null, null, 0)$$, '22023', null, 'p_limit 0 raises 22023');
+select throws_ok($$select * from agent_memory.search_memories('x', null, 'keyword', null, null, null, null, null, null)$$, '22023', null, 'null p_limit raises 22023');
+
 reset role;
 
 -- ro: alpha-only member
 select set_config('agent_memory.member_id', '22222222-2222-2222-2222-222222222222', true);
 set local role agent_memory_member;
-set local enable_seqscan = off;
-set local enable_bitmapscan = off;
-
--- Prove the HNSW index is what is being used and that the RLS filter bites: with iterative scan off the index
--- scan returns only the ef_search candidates (all beta), so far fewer than 10 alpha rows survive.
-set local hnsw.iterative_scan = off;
-select ok((select count(*) from (select id from agent_memory.memories order by embedding operator(extensions.<=>) pg_temp.v(1) limit 10) s) < 10,
-  'without iterative scan the HNSW index starves the alpha-only member (index in use)');
-reset hnsw.iterative_scan;
+discard plans;
 
 select is((select count(*) from agent_memory.search_memories('x', pg_temp.v(1), 'semantic', null, null, null, null, null, 10)), 10::bigint,
   'small scope gets a full page from the vector arm');
+select is((select array_agg(id order by raw_score desc, id) from agent_memory.search_memories('x', pg_temp.v(1), 'semantic', null, null, null, null, null, 10)),
+  (select array_agg(id order by dist, id) from (select m.id, m.embedding operator(extensions.<=>) pg_temp.v(1) as dist
+     from agent_memory.memories m where m.scope_id = 'a0000000-0000-0000-0000-00000000000a' order by 2, 1 limit 10) n),
+  'the 10 rows are the alpha rows nearest the query');
 
 select is((select count(*) from agent_memory.search_memories('charge window', pg_temp.v(1), 'keyword', array['b0000000-0000-0000-0000-00000000000b']::uuid[], null, null, null, null, 10)),
   0::bigint, 'beta rows hidden in keyword mode even when named');
