@@ -47,7 +47,8 @@ select is((select count(*) from agent_memory.memory_history where memory_id = 'a
   1::bigint, 'insert writes history');
 
 -- touch_accessed as ro (backdate so the one-hour guard allows the first touch)
-update agent_memory.memories set updated_at = now() - interval '2 hours' where id = 'aaaaaaaa-0000-0000-0000-000000000001';
+update agent_memory.memories set updated_at = now() - interval '2 hours'
+  where id in ('aaaaaaaa-0000-0000-0000-000000000001', 'bbbbbbbb-0000-0000-0000-000000000001');
 select set_config('agent_memory.member_id', '22222222-2222-2222-2222-222222222222', true);
 set local role agent_memory_member;
 select agent_memory.touch_accessed(array['aaaaaaaa-0000-0000-0000-000000000001', 'bbbbbbbb-0000-0000-0000-000000000001']::uuid[]);
