@@ -185,7 +185,8 @@ Some members are admins. An admin can manage the team from Claude, not only from
   A scope can only be deleted once it holds no memories, live or soft-deleted.
 - **From Claude**, admins can do the rest with the `admin_` tools: `admin_list_scopes`, `admin_create_scope`,
   `admin_delete_scope`, `admin_list_members`, `admin_create_member`, `admin_deactivate_member`, `admin_list_grants`,
-  `admin_grant`, `admin_revoke`, `admin_issue_token`, `admin_list_tokens` and `admin_revoke_token`.
+  `admin_grant`, `admin_revoke`, `admin_issue_token`, `admin_list_tokens`, `admin_revoke_token` and
+  `admin_delete_thread` (a soft delete; `restore-thread` and `erase-thread` are shell-only).
 - **Connecting an onboarded member.** The admin issues a token with `admin_issue_token` (or `issue-token`) and gives it
   to the member, who registers it with Claude Code:
 
