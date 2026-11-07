@@ -8,3 +8,4 @@ dist/
 memories*.json
 backup*.json
 ids*.txt
+!.env.example

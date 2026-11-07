@@ -14,7 +14,33 @@ The server exposes eleven tools: `list_scopes`, `store`, `store_batch`, `search`
 write tools. Search is hybrid (BM25 full-text plus `gte-small` vector similarity, fused with RRF) with temporal decay.
 Delete and prune are soft; rows are purged after 30 days.
 
-## Install
+## Quick start
+
+Two commands take an empty Supabase project to a working Claude connection. You need the Supabase CLI 3.x and Deno 2.x.
+
+```sh
+cp .env.example .env     # then fill in SUPABASE_ACCESS_TOKEN, SUPABASE_DB_PASSWORD and SUPABASE_PROJECT_REF
+deno run -A scripts/setup.ts --configure-claude
+```
+
+`setup.ts` links the project, applies the migrations, deploys the function, creates a scope (`default`) and a member
+(your OS user), grants it write access and issues a token. It saves `AGENT_MEMORY_URL`, `AGENT_MEMORY_TOKEN` and
+`AGENT_MEMORY_DB_URL` into `.env` (mode 0600; it refuses to write unless git ignores the file) and prints the token once.
+`--configure-claude` then runs `claude mcp add` for you. Re-running is safe: nothing is duplicated, and a live token in
+`.env` is reused.
+
+Flags: `--env-file <path>` (default `.env`), `--scope <name>` (default `default`), `--member <name>`,
+`--email <address>` (a human member needs one; defaults to `git config user.email`), `--bot` (a bot member instead of a
+human), `--new-token` (issue another token even if `.env` has a live one), `--skip-deploy`, `--configure-claude` and
+`--name <server-name>` (default `shared-memory`).
+
+To register an existing token without re-running setup:
+`deno run -A scripts/configure-claude.ts [--name shared-memory] [--scope user|project]`. Project scope writes the token
+into `.mcp.json`, which is normally committed, so it needs `--yes`; prefer the default `user` scope.
+
+The manual steps follow, if you prefer to run each yourself.
+
+### Install by hand
 
 You need a Supabase project (the free tier works), **Supabase CLI 3.x** (the commands below use its flags; CI pins
 3.0.0) and [Deno](https://deno.com/) 2.x.
@@ -129,6 +155,9 @@ deno run -A scripts/import.ts --file memories.json --include-tag repo:batpred --
 
 A tag filter alone can let private memories through, so review the ids before `--execute`. Re-running is safe:
 memories already present are skipped. Content over 20,000 characters is reported as failed and not imported.
+
+> **Warning:** the importer keeps each memory's original id. Re-running `import.ts` from an old export can bring back
+> memories that were since erased or purged. Remove those memories from the local export too.
 
 `scripts/smoke.ts` is described under [Smoke test](#smoke-test).
 

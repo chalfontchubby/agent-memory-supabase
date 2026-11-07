@@ -4,6 +4,7 @@
     "jsr:@std/assert@1": "1.0.19",
     "jsr:@std/cli@1.0.9": "1.0.9",
     "jsr:@std/internal@^1.0.12": "1.0.14",
+    "jsr:@std/path@1.0.8": "1.0.8",
     "jsr:@supabase/functions-js@2": "2.110.2",
     "npm:@modelcontextprotocol/client@2.4.0": "2.4.0",
     "npm:@modelcontextprotocol/server@2.4.0": "2.4.0",
@@ -23,6 +24,9 @@
     },
     "@std/internal@1.0.14": {
       "integrity": "291516b3d4c35024d6ffbc0a9df5bf4c64116e05b50012cf846710152d2ffdf7"
+    },
+    "@std/path@1.0.8": {
+      "integrity": "548fa456bb6a04d3c1a1e7477986b6cffbce95102d0bb447c67c4ee70e0364be"
     },
     "@supabase/functions-js@2.110.2": {
       "integrity": "4b21a1cbe87b81585ac308adf08a7890dd716c2cf82e29036a6764dbad21443b",
