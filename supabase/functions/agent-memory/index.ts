@@ -6,6 +6,7 @@ import { registerAdminTools } from '../_shared/admin-tools.ts';
 import { GteSmallEmbedder } from '../_shared/embedder.ts';
 import { MAX_CONTENT_CHARS } from '../_shared/limits.ts';
 import { PgMemoryStore } from '../_shared/pg-store.ts';
+import { PgThreadStore } from '../_shared/thread-store.ts';
 import { registerTools } from '../_shared/tools.ts';
 
 const VERSION = '0.1.0';
@@ -64,9 +65,10 @@ async function handle(req: Request): Promise<Response> {
 
   // Stateless: a fresh server per request, bound to this member's store.
   const store = new PgMemoryStore(sql, memberId, embedder);
+  const threads = new PgThreadStore(sql, memberId);
   const mcp = createMcpHandler(() => {
     const s = new McpServer({ name: 'agent-memory-supabase', version: VERSION });
-    registerTools(s, store, embedder);
+    registerTools(s, store, embedder, threads);
     if (isAdmin) registerAdminTools(s, new PgAdminStore(sql, memberId));
     return s;
   }, { onerror: (e) => console.error('mcp error', e) });

@@ -29,6 +29,11 @@ export interface Memory {
   updatedAt: string;
   createdBy: string;
   updatedBy: string;
+  /** Session labels; omitted when the write named no session. */
+  createdSession?: string;
+  updatedSession?: string;
+  /** Linked threads; set by recall only where links exist. */
+  threads?: LinkedThread[];
 }
 
 export interface SearchResult {
@@ -104,13 +109,13 @@ export interface Embedder {
 
 export interface MemoryStore {
   listScopes(): Promise<ScopeInfo[]>;
-  store(scope: string, r: StoreRequest): Promise<Memory>;
-  storeBatch(scope: string, rs: StoreRequest[]): Promise<Memory[]>;
+  store(scope: string, r: StoreRequest, s?: SessionRef): Promise<Memory>;
+  storeBatch(scope: string, rs: StoreRequest[], s?: SessionRef): Promise<Memory[]>;
   /** `embedding`: precomputed vector; `null` = keyword-only. */
   search(query: string, mode: SearchMode, f: SearchFilters, embedding?: number[] | null): Promise<SearchResult[]>;
   findRelated(id: string, limit: number, scopes?: string[]): Promise<SearchResult[]>;
   listRecent(limit: number, category?: MemoryCategory, scopes?: string[]): Promise<Memory[]>;
-  update(id: string, u: UpdateRequest): Promise<Memory>;
+  update(id: string, u: UpdateRequest, s?: SessionRef): Promise<Memory>;
   delete(id: string): Promise<void>;
   stats(scopes?: string[]): Promise<MemoryStats>;
   prune(o: PruneOptions): Promise<PruneResult>;

@@ -242,3 +242,55 @@ Deno.test('content over 20000 characters is rejected before embedding', () =>
     const [r] = await admin`select count(*)::int as n from agent_memory.memories where scope_id = ${w.alpha.id}`;
     assertEquals(r.n, 1);
   }));
+
+const mkSession = async (admin: ReturnType<typeof adminSql>, memberId: string, label: string) =>
+  (await admin`insert into agent_memory.agent_sessions (member_id, label) values (${memberId}, ${label}) returning id`)[
+    0
+  ]
+    .id as string;
+
+Deno.test('store records session', () =>
+  withWorld(async (w, admin, mk) => {
+    const [s] = mk(w.rw.id);
+    const sid = await mkSession(admin, w.rw.id, 'sess-a');
+    const m = await s.store(w.alpha.name, req('with session'), { session: sid });
+    assertEquals(m.createdSession, 'sess-a');
+    assertEquals(m.updatedSession, 'sess-a');
+    const [h] = await admin`select session_id from agent_memory.memory_history where memory_id = ${m.id}`;
+    assertEquals(h.session_id, sid);
+    const byLabel = await s.store(w.alpha.name, req('by label'), { sessionLabel: 'sess-a' });
+    assertEquals(byLabel.createdSession, 'sess-a');
+    const plain = await s.store(w.alpha.name, req('no session'));
+    assertEquals('createdSession' in plain, false);
+    await assertRejects(() => s.store(w.alpha.name, req('x'), { session: 'nope' }), Error, 'Session not found');
+    await assertRejects(
+      () => s.store(w.alpha.name, req('x'), { sessionLabel: 'unknown-label' }),
+      Error,
+      'Session not found',
+    );
+  }));
+
+Deno.test("update with another member's session is refused", () =>
+  withWorld(async (w, admin, mk) => {
+    const [s] = mk(w.rw.id);
+    const m = await s.store(w.alpha.name, req('target'));
+    const other = await mkSession(admin, w.bw.id, 'other-sess');
+    await assertRejects(() => s.update(m.id, { tags: ['x'] }, { session: other }), Error, 'Session not found');
+  }));
+
+Deno.test('update without session clears updated_session attribution', () =>
+  withWorld(async (w, admin, mk) => {
+    const [s] = mk(w.rw.id);
+    const sid = await mkSession(admin, w.rw.id, 'sess-b');
+    const m = await s.store(w.alpha.name, req('first'), { session: sid });
+    const u1 = await s.update(m.id, { tags: ['a'] }, { session: sid });
+    assertEquals(u1.updatedSession, 'sess-b');
+    const u2 = await s.update(m.id, { tags: ['b'] });
+    assertEquals('updatedSession' in u2, false);
+    assertEquals(u2.createdSession, 'sess-b');
+    const h = await admin`
+      select session_id from agent_memory.memory_history where memory_id = ${m.id} and action = 'update'
+      order by at desc`;
+    assertEquals(h[0].session_id, null);
+    assertEquals(h[1].session_id, sid);
+  }));

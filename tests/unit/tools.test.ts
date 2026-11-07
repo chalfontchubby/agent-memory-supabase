@@ -34,8 +34,8 @@ function mockStore(opts: { storeError?: Error } = {}): { store: MemoryStore; cal
   const rec = (n: string, ...a: unknown[]) => (calls[n] ??= []).push(a);
   const store: MemoryStore = {
     listScopes: () => Promise.resolve([]),
-    store: (scope, r) => {
-      rec('store', scope, r);
+    store: (scope, r, ...s) => {
+      rec('store', scope, r, ...s);
       if (opts.storeError) return Promise.reject(opts.storeError);
       return Promise.resolve(mem('1', scope));
     },
@@ -58,8 +58,8 @@ function mockStore(opts: { storeError?: Error } = {}): { store: MemoryStore; cal
       rec('listRecent', limit, category, scopes);
       return Promise.resolve([]);
     },
-    update: (id, u) => {
-      rec('update', id, u);
+    update: (id, u, ...s) => {
+      rec('update', id, u, ...s);
       return Promise.resolve(mem(id));
     },
     delete: () => Promise.resolve(),
@@ -81,6 +81,8 @@ function mockStore(opts: { storeError?: Error } = {}): { store: MemoryStore; cal
   };
   return { store, calls };
 }
+
+const noThreads = { linkedThreads: () => Promise.resolve({}) };
 
 function mockEmbedder(): { embedder: Embedder; manyCalls: string[][] } {
   const manyCalls: string[][] = [];
@@ -124,7 +126,7 @@ Deno.test('handleRecall embeds first 5 topics once; the rest are keyword-only', 
   const { store, calls } = mockStore();
   const { embedder, manyCalls } = mockEmbedder();
   const topics = ['t1', 't2', 't3', 't4', 't5', 't6', 't7'];
-  const r = await handleRecall(store, embedder)({ topics });
+  const r = await handleRecall(store, embedder, noThreads)({ topics });
   assertEquals(manyCalls, [topics.slice(0, 5)]);
   const searches = calls.search;
   assertEquals(searches.length, 7);
@@ -139,7 +141,7 @@ Deno.test('handleRecall embeds first 5 topics once; the rest are keyword-only', 
 Deno.test('handleRecall with 2 topics has no keywordOnlyTopics key', async () => {
   const { store } = mockStore();
   const { embedder } = mockEmbedder();
-  const r = await handleRecall(store, embedder)({ topics: ['a', 'b'] });
+  const r = await handleRecall(store, embedder, noThreads)({ topics: ['a', 'b'] });
   const body = JSON.parse(r.content[0].text);
   assert(!('keywordOnlyTopics' in body));
   assert('recent' in body);
@@ -150,7 +152,7 @@ Deno.test('empty scopes array means all readable scopes', async () => {
   const { embedder } = mockEmbedder();
   await handleSearch(store)({ query: 'q', scopes: [] });
   assertEquals((calls.search[0][2] as SearchFilters).scopes, undefined);
-  await handleRecall(store, embedder)({ topics: ['a'], scopes: [] });
+  await handleRecall(store, embedder, noThreads)({ topics: ['a'], scopes: [] });
   assertEquals((calls.search[1][2] as SearchFilters).scopes, undefined);
   assertEquals(calls.listRecent[0][2], undefined);
   await handleListRecent(store)({ scopes: [] });
@@ -178,7 +180,7 @@ Deno.test('registerTools registers exactly 11 tools', () => {
   const { store } = mockStore();
   const { embedder } = mockEmbedder();
   const server = new McpServer({ name: 'test', version: '0.0.0' });
-  registerTools(server, store, embedder);
+  registerTools(server, store, embedder, noThreads as never);
   const registered = (server as unknown as { _registeredTools: Record<string, unknown> })._registeredTools;
   assertEquals(
     Object.keys(registered).sort(),
@@ -202,7 +204,7 @@ Deno.test('handleRecall with include_recent 0 returns recent [] without listing'
   const { store, calls } = mockStore();
   const { embedder } = mockEmbedder();
   for (const n of [0, -1]) {
-    const r = await handleRecall(store, embedder)({ topics: ['a'], include_recent: n });
+    const r = await handleRecall(store, embedder, noThreads)({ topics: ['a'], include_recent: n });
     assert(!('isError' in r));
     assertEquals(JSON.parse(r.content[0].text).recent, []);
   }
@@ -213,11 +215,11 @@ Deno.test('handleRecall rejects a bad limit_per_topic before embedding', async (
   const { store, calls } = mockStore();
   const { embedder, manyCalls } = mockEmbedder();
   for (const n of [0, 101]) {
-    const r = await handleRecall(store, embedder)({ topics: ['a', 'b'], limit_per_topic: n });
+    const r = await handleRecall(store, embedder, noThreads)({ topics: ['a', 'b'], limit_per_topic: n });
     assertEquals((r as { isError?: boolean }).isError, true);
     assertEquals(r.content[0].text, 'Recall failed: limit must be between 1 and 100');
   }
-  const r = await handleRecall(store, embedder)({ topics: ['a'], include_recent: 101 });
+  const r = await handleRecall(store, embedder, noThreads)({ topics: ['a'], include_recent: 101 });
   assertEquals(r.content[0].text, 'Recall failed: limit must be between 1 and 100');
   assertEquals(manyCalls, []);
   assertEquals(calls.search, undefined);
@@ -227,11 +229,36 @@ Deno.test('store_batch description states the per-call cap', () => {
   const { store } = mockStore();
   const { embedder } = mockEmbedder();
   const server = new McpServer({ name: 'test', version: '0.0.0' });
-  registerTools(server, store, embedder);
+  registerTools(server, store, embedder, noThreads as never);
   const registered = (server as unknown as { _registeredTools: Record<string, { description?: string }> })
     ._registeredTools;
   assertStringIncludes(
     registered.store_batch.description ?? '',
     `at most ${STORE_BATCH_MAX} memories per call on this server; split larger batches.`,
   );
+});
+
+Deno.test('recall attaches linked threads only where present', async () => {
+  const { store } = mockStore();
+  store.listRecent = () => Promise.resolve([mem('m1'), mem('m2')]);
+  store.search = () => Promise.resolve([{ memory: mem('m1'), score: 1 }, { memory: mem('m2'), score: 1 }]);
+  const thread = { id: 't', title: 'T', scope: 's', status: 'open' as const, lastPostAt: '2026-01-01T00:00:00Z' };
+  const { embedder } = mockEmbedder();
+  const r = await handleRecall(store, embedder, { linkedThreads: () => Promise.resolve({ m1: [thread] }) })({
+    topics: ['a'],
+  });
+  const body = JSON.parse(r.content[0].text);
+  assertEquals(body.byTopic.a[0].memory.threads, [thread]);
+  assertEquals('threads' in body.byTopic.a[1].memory, false);
+  assertEquals(body.recent[0].threads, [thread]);
+  assertEquals('threads' in body.recent[1], false);
+});
+
+Deno.test('store, store_batch and update pass the session through only when given', async () => {
+  const { store, calls } = mockStore();
+  await handleStore(store)({ scope: 'w', content: 'x', category: 'other', tags: [], session_label: 'L' });
+  assertEquals(calls.store[0][2], { sessionLabel: 'L' });
+  await handleUpdate(store)({ id: 'i', tags: ['x'], session: 'u' });
+  assertEquals(calls.update[0][2], { session: 'u' });
+  assertEquals(Object.keys(calls.update[0][1]), ['tags']);
 });

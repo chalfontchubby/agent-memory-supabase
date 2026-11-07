@@ -299,3 +299,21 @@ Deno.test('decay disabled: a recent memory is not a prune candidate', () =>
     assertEquals(dry.candidates, []);
     assertEquals((await s.stats()).belowPruneThreshold, 0);
   }));
+
+Deno.test('search results carry session labels', () =>
+  withWorld(async (w, admin, mk) => {
+    const [s] = mk(w.rw.id);
+    const [{ id: sid }] = await admin`
+      insert into agent_memory.agent_sessions (member_id, label) values (${w.rw.id}, 'read-sess') returning id`;
+    const m = await s.store(w.alpha.name, req('quokkaflux labelled memory'), { session: sid });
+    await s.store(w.alpha.name, req('quokkaflux unlabelled sibling'));
+    const r = await s.search('quokkaflux', 'keyword', {});
+    const hit = r.find((x) => x.memory.id === m.id)!;
+    assertEquals(hit.memory.createdSession, 'read-sess');
+    const bare = r.find((x) => x.memory.id !== m.id)!;
+    assertEquals('createdSession' in bare.memory, false);
+    const rel = await s.findRelated(m.id, 5);
+    assert(rel.length > 0);
+    const recent = await s.listRecent(10);
+    assertEquals(recent.find((x) => x.id === m.id)!.createdSession, 'read-sess');
+  }));
