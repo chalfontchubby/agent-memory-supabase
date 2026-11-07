@@ -321,12 +321,17 @@ language plpgsql security definer set search_path = ''
 as $$
 declare
   v_seq int;
+  v_at timestamptz;
 begin
   -- The row lock serialises concurrent posters, so seq = post_count + 1 never collides.
   select t.post_count + 1 into v_seq from agent_memory.threads t where t.id = p_thread for update;
-  update agent_memory.threads t set post_count = v_seq, last_post_at = pg_catalog.now() where t.id = p_thread;
-  insert into agent_memory.thread_posts (thread_id, seq, kind, body, author_id, session_id)
-  values (p_thread, v_seq, p_kind, p_body, agent_memory.current_member_id(), p_session);
+  -- last_post_at never moves backwards; the post carries the same timestamp.
+  update agent_memory.threads t
+  set post_count = v_seq, last_post_at = greatest(t.last_post_at, pg_catalog.clock_timestamp())
+  where t.id = p_thread
+  returning t.last_post_at into v_at;
+  insert into agent_memory.thread_posts (thread_id, seq, kind, body, author_id, session_id, created_at)
+  values (p_thread, v_seq, p_kind, p_body, agent_memory.current_member_id(), p_session, v_at);
   if p_session is not null then
     -- Posting subscribes at the new seq, but never moves an existing marker.
     insert into agent_memory.thread_subscriptions (session_id, thread_id, last_seen_seq)
@@ -556,8 +561,9 @@ begin
     raise exception 'Session not found';
   end if;
   update agent_memory.thread_subscriptions s
-  set last_seen_seq = greatest(s.last_seen_seq, p_seq)
-  where s.session_id = p_session and s.thread_id = p_thread;
+  set last_seen_seq = greatest(s.last_seen_seq, least(p_seq, t.post_count))
+  from agent_memory.threads t
+  where t.id = s.thread_id and s.session_id = p_session and s.thread_id = p_thread;
 end
 $$;
 

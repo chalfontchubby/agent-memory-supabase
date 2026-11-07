@@ -194,6 +194,8 @@ Deno.test('listThreads pages newest first', () =>
     assertEquals((await s.listThreads({ scopes: [w.alpha.name] })).threads.length, 2);
     assertEquals((await s.listThreads({ scopes: [w.alpha.name], status: 'all' })).threads.length, 3);
     await assertRejects(() => s.listThreads({ before: 'garbage!' }), Error, 'Invalid cursor');
+    const badTs = btoa('99999-01-01 00:00:00+00|00000000-0000-4000-8000-000000000000');
+    await assertRejects(() => s.listThreads({ scopes: [w.alpha.name], before: badTs }), Error, 'Invalid cursor');
     await assertRejects(
       () => mk(w.none.id).listThreads({ scopes: [w.alpha.name] }),
       Error,

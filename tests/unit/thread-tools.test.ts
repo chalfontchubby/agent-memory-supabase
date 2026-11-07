@@ -174,3 +174,13 @@ Deno.test('descriptions: creating tools say pass it back; lookup tools never cla
   assertStringIncludes(reg.whats_new.description ?? '', 'between steps');
   assert(!(reg.whats_new.description ?? '').includes('start of a session'));
 });
+
+Deno.test('read_thread bounds before, after and limit-style numbers to int32', () => {
+  const { reg } = setup();
+  // deno-lint-ignore no-explicit-any
+  const schema = (reg.read_thread as any).inputSchema;
+  assert(schema.safeParse({ thread_id: T, before: 2147483647 }).success);
+  assert(!schema.safeParse({ thread_id: T, before: 2147483648 }).success);
+  assert(!schema.safeParse({ thread_id: T, after: 99999999999 }).success);
+  assert(!schema.safeParse({ thread_id: T, after: 0 }).success);
+});

@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(36);
+select plan(37);
 
 -- Fixtures (as postgres): w writes s1 and s2, r reads s1, o has no grants.
 insert into agent_memory.scopes (id, name) values
@@ -107,6 +107,11 @@ select is((select count(*) from u), 1::bigint, 'second writer updates memory cre
 with u as (update agent_memory.memories set content = 'edited again', updated_by = '44444444-4444-4444-4444-444444444444',
            updated_session = '54444444-0000-0000-0000-000000000001' where content = 'edited by w2' returning 1)
 select is((select count(*) from u), 1::bigint, 'second writer updates with their own updated_session');
+select throws_ok(
+  $$update agent_memory.memories set content = 'steal', updated_by = '44444444-4444-4444-4444-444444444444',
+    updated_session = '51111111-0000-0000-0000-000000000001' where content = 'edited again'$$,
+  '42501', 'new row violates row-level security policy for table "memories"',
+  'updated_session of another member''s session is refused');
 reset role;
 
 -- r

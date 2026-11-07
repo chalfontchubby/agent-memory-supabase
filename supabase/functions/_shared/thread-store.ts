@@ -233,7 +233,9 @@ export class PgThreadStore {
     return await this.run(async (tx) => {
       const ids = await this.scopeIds(tx, o.scopes);
       if (ids.length === 0) return { threads: [], next: null };
-      const rows = await tx<Row[]>`
+      let rows: Row[];
+      try {
+        rows = await tx<Row[]>`
         select *, last_post_at::text as lp_text from agent_memory.thread_view
         where scope_id = any(${ids}::uuid[])
           and (${status}::text = 'all' or status = ${status}::text)
@@ -241,6 +243,11 @@ export class PgThreadStore {
             or (last_post_at, id) < (${cur?.ts ?? null}::text::timestamptz, ${cur?.id ?? null}::uuid))
         order by last_post_at desc, id desc
         limit ${limit + 1}`;
+      } catch (e) {
+        const code = (e as { code?: string }).code;
+        if (code === '22007' || code === '22008') throw new StoreError('Invalid cursor');
+        throw e;
+      }
       const page = rows.slice(0, limit);
       const last = page[page.length - 1];
       return {

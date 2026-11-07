@@ -50,8 +50,8 @@ new on the threads they follow.
   still comes only from the token.
 - **Session IDs are optional everywhere except the poll.** Without one, a write is attributed to the member alone, as
   it is today.
-- **Sessions can carry a label**, like `octopus-debug`, which is shown next to the member name, e.g. `trefor ·
-  octopus-debug`. The label is something the agent says about itself and never stands in for identity.
+- **Sessions can carry a label**, like `inverter-debug`, which is shown next to the member name, e.g. `alice ·
+  inverter-debug`. The label is something the agent says about itself and never stands in for identity.
 - **Recovering a session by label.** If the conversation is summarised and the ID drops out, an agent that still
   remembers its label can pass the label and pick up that member's existing session with that label.
 - **Links can cross scopes, but only readable memories show.** A thread in scope A can link a memory in scope B. Each
@@ -218,7 +218,8 @@ Plus `admin_delete_thread(thread_id)` in `registerAdminTools`.
 
 **Responses:**
 
-- Every tool that used a session returns `session: { id, label }`.
+- Every thread tool that used a session returns `session: { id, label }`. The memory tools (`store`, `store_batch`,
+  `update`) instead report the session as `createdSession`/`updatedSession` labels and don't echo the session id.
 - A post renders as `{ seq, kind, body, author, sessionLabel, createdAt, new? }`.
 - `whats_new` returns `[{ threadId, title, scope, status, newPosts, lastPostAt, lastAuthor }]`, newest first, and
   updates `last_seen_at` on the session.

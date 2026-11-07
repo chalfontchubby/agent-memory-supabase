@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(63);
+select plan(65);
 
 -- Fixtures (as postgres): w writes s1, r reads s1, o has no grants. s3 is granted to nobody.
 insert into agent_memory.scopes (id, name) values
@@ -110,8 +110,12 @@ select is((select count(*) from agent_memory.whats_new('51111111-0000-0000-0000-
 select agent_memory.mark_seen('51111111-0000-0000-0000-00000000000a', (select id from t1), 1);
 select is((select last_seen_seq from agent_memory.thread_subscriptions where thread_id = (select id from t1)
   and session_id = '51111111-0000-0000-0000-00000000000a'), 3, 'mark_seen never moves the marker back');
+select agent_memory.mark_seen('51111111-0000-0000-0000-00000000000a', (select id from t1), 999);
+select is((select last_seen_seq from agent_memory.thread_subscriptions where thread_id = (select id from t1)
+  and session_id = '51111111-0000-0000-0000-00000000000a'), 3, 'mark_seen beyond post_count clamps to post_count');
 select is(agent_memory.post_to_thread((select id from t1), 'B again', '51111111-0000-0000-0000-00000000000b'), 4, 'B posts seq 4');
 select is((select new_posts from agent_memory.whats_new('51111111-0000-0000-0000-00000000000a')), 1, 'A sees B seq 4 only');
+select ok((select last_post_at from agent_memory.threads where id = (select id from t1)) >= (select max(created_at) from agent_memory.thread_posts where thread_id = (select id from t1)), 'last_post_at not behind newest post');
 select agent_memory.subscribe((select id from t1), '51111111-0000-0000-0000-00000000000c');
 select is((select count(*) from agent_memory.whats_new('51111111-0000-0000-0000-00000000000c')), 0::bigint, 'late subscriber C sees nothing');
 

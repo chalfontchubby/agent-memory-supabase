@@ -67,10 +67,13 @@ const BASE_TOOLS = [
 ];
 
 let failures = 0;
-async function step(name: string, fn: () => Promise<void>) {
+async function step(name: string, fn: () => Promise<void | 'skip'>) {
   const t0 = performance.now();
   try {
-    await fn();
+    if (await fn() === 'skip') {
+      console.log(`SKIP ${name} (no admin tools)`);
+      return;
+    }
     console.log(`PASS ${name} (${Math.round(performance.now() - t0)} ms)`);
   } catch (e) {
     failures++;
@@ -196,7 +199,9 @@ await step('resolve_thread', async () => {
   ok(r.thread?.status === 'resolved', `status ${r.thread?.status}`);
 });
 await step('admin_delete_thread', async () => {
-  if (!adminTools) return;
+  if (!adminTools) {
+    return 'skip';
+  }
   await call('admin_delete_thread', { thread_id: threadId });
   threadId = '';
 });
@@ -208,7 +213,7 @@ await step('delete', async () => {
 });
 
 await client.close();
-if (threadId) console.log(`WARNING: thread ${threadId} left resolved in '${scope}'`);
+if (threadId) console.log(`WARNING: thread ${threadId} left behind in '${scope}'`);
 if (created.length) console.log(`WARNING: ${created.length} memories left in '${scope}': ${created.join(', ')}`);
 console.log(failures ? `${failures} FAILED` : 'ALL PASSED');
 Deno.exit(failures ? 1 : 0);

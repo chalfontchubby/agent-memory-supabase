@@ -49,7 +49,8 @@ export function registerAdminTools(server: McpServer, admin: PgAdminStore): void
     }));
 
   server.registerTool('admin_delete_thread', {
-    description: 'Admin: Delete a thread with its posts, links and subscriptions. Cannot be undone from here.',
+    description:
+      'Admin: Delete a thread with its posts, links and subscriptions. This is a soft delete: it is purged after 30 days and can be restored from the shell with `admin.ts restore-thread`.',
     inputSchema: z.object({ thread_id: z.string().describe('Thread id') }),
   }, ({ thread_id }) =>
     guard(async () => {

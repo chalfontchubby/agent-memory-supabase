@@ -113,8 +113,8 @@ export function registerThreadTools(server: McpServer, threads: ThreadStoreLike)
     inputSchema: z.object({
       thread_id: z.string().describe('Thread id'),
       limit: z.number().int().optional().describe('Max posts to return (default 20, 1-100)'),
-      before: z.number().int().optional().describe('Page back: posts with a seq below this'),
-      after: z.number().int().optional().describe('Page forward: posts with a seq above this'),
+      before: z.number().int().min(1).max(2147483647).optional().describe('Page back: posts with a seq below this'),
+      after: z.number().int().min(1).max(2147483647).optional().describe('Page forward: posts with a seq above this'),
       ...sessionShape,
     }),
   }, (a) =>
