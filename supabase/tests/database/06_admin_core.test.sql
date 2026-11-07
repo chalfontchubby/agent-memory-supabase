@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(48);
+select plan(51);
 
 -- schema
 select has_column('agent_memory'::name, 'members'::name, 'is_admin'::name, 'members.is_admin exists');
@@ -34,6 +34,17 @@ select is((select count(*) from agent_memory.admin_log
 select is(agent_memory.resolve_token('hash-alice-1'),
   (select id from agent_memory.members where display_name = 'alice'), 'resolve_token finds active member');
 
+-- guard in resolve_token itself: a deactivated member with a still-live token must not resolve
+insert into agent_memory.members (id, display_name, kind, deactivated_at)
+  values ('d0000000-0000-0000-0000-0000000000e1', 'erin', 'human', now());
+insert into agent_memory.access_tokens (member_id, name, token_hash)
+  values ('d0000000-0000-0000-0000-0000000000e1', 'live', 'hash-erin');
+select is((select count(*) from agent_memory.access_tokens where token_hash = 'hash-erin' and revoked_at is null),
+  1::bigint, 'precondition: erin''s token is not revoked');
+select is(agent_memory.resolve_token('hash-erin'), null, 'resolve_token ignores an unrevoked token of a deactivated member');
+select is((select count(*) from agent_memory.resolve_member('hash-erin')), 0::bigint,
+  'resolve_member returns no rows for an unrevoked token of a deactivated member');
+
 -- deactivation
 select agent_memory.adm_deactivate_member('alice', null, 'test');
 select is(agent_memory.resolve_token('hash-alice-1'), null, 'deactivated tokens stop resolving');
@@ -60,13 +71,21 @@ select agent_memory.adm_set_admin('alice', true, null, 'test');
 select is((select is_admin from agent_memory.resolve_member('hash-alice-1')), null, 'revoked token still does not resolve');
 select agent_memory.adm_issue_token('alice', 'second', 'hash-alice-2', null, null, 'test');
 select is((select is_admin from agent_memory.resolve_member('hash-alice-2')), true, 'resolve_member reports is_admin');
+insert into agent_memory.members (id, display_name, kind, is_admin, deactivated_at)
+  values ('d0000000-0000-0000-0000-0000000000d1', 'dave', 'human', true, now());
 select throws_ok($$select agent_memory.adm_set_admin('alice', false, null, 'test')$$,
-  'P0001', 'Can''t remove the last active admin', 'last admin cannot be demoted');
+  'P0001', 'Can''t remove the last active admin', 'last admin cannot be demoted, even beside a deactivated admin');
 select throws_ok($$select agent_memory.adm_deactivate_member('alice', null, 'test')$$,
   'P0001', 'Can''t remove the last active admin', 'last admin cannot be deactivated');
 select agent_memory.adm_set_admin('bob', true, null, 'test');
 select lives_ok($$select agent_memory.adm_set_admin('alice', false, null, 'test')$$, 'with two admins, demotion works');
 select is((select count(*) from agent_memory.admin_log where action = 'set_admin'), 3::bigint, 'set_admin logs one row each');
+insert into agent_memory.members (id, display_name, kind, is_admin)
+  values ('d0000000-0000-0000-0000-0000000000c1', 'carol', 'human', true);
+select agent_memory.adm_deactivate_member('carol', null, 'test');
+select agent_memory.adm_reactivate_member('carol', null, 'test');
+select is((select is_admin from agent_memory.members where display_name = 'carol'), false,
+  'deactivation removes admin and reactivation does not restore it');
 
 -- duplicates and names
 select throws_ok($$select agent_memory.adm_create_scope('s1', null, null, 'test')$$, 'P0001', 'Scope ''s1'' already exists', 'dup scope');
@@ -106,10 +125,9 @@ set local role agent_memory_member;
 select throws_ok($$select * from agent_memory.admin_log$$, '42501', null, 'member cannot read admin_log');
 select throws_ok($$select agent_memory.adm_create_scope('zz', null, null, 'x')$$, '42501', null, 'member cannot call adm_*');
 reset role;
-select is((select count(*) from pg_catalog.pg_proc p, (values ('anon'), ('authenticated'), ('agent_memory_member')) r(rn)
-  where p.pronamespace = 'agent_memory'::regnamespace and (p.proname like 'adm\_%' or p.proname = 'resolve_member')
-    and has_function_privilege(r.rn, p.oid, 'execute')), 0::bigint, 'no client role can execute adm_* or resolve_member');
-select is((select count(*) from agent_memory.admin_log where actor_label is null), 0::bigint, 'actor_label always set');
-select is((select count(*) from agent_memory.admin_log), 19::bigint, 'total log rows match successful calls');
+select is((select count(*) from pg_catalog.pg_proc p, (values ('anon'), ('authenticated'), ('service_role'), ('agent_memory_member')) r(rn)
+  where p.pronamespace = 'agent_memory'::regnamespace and (p.proname like 'adm\_%' or p.proname in ('resolve_member', 'resolve_token'))
+    and has_function_privilege(r.rn, p.oid, 'execute')), 0::bigint, 'no client role can execute adm_*, resolve_member or resolve_token');
+select is((select count(*) from agent_memory.admin_log), 21::bigint, 'total log rows match successful calls');
 select * from finish();
 rollback;

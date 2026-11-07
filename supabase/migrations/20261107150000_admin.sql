@@ -147,7 +147,8 @@ begin
   perform agent_memory.adm_assert_not_last_admin(v_id);
   update agent_memory.access_tokens set revoked_at = pg_catalog.now() where member_id = v_id and revoked_at is null;
   delete from agent_memory.scope_grants where member_id = v_id;
-  update agent_memory.members set deactivated_at = coalesce(deactivated_at, pg_catalog.now()) where id = v_id;
+  update agent_memory.members set deactivated_at = coalesce(deactivated_at, pg_catalog.now()), is_admin = false
+  where id = v_id;
   insert into agent_memory.admin_log (actor_member_id, actor_label, action, target, details)
   values (p_actor, p_label, 'deactivate_member', p_name, '{}');
 end
